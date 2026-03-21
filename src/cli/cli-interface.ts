@@ -47,7 +47,7 @@ export class CLIInterface {
         }
 
         if (trimmedCommand.toLowerCase() === '/new') {
-          this.agent.newSession();
+          await this.agent.newSession();
           console.log(chalk.cyan('\n🆕 New session started. Conversation history cleared.\n'));
           continue;
         }
@@ -90,11 +90,12 @@ export class CLIInterface {
   }
 
   private showTokenUsage() {
-    const { used, max } = this.agent.getTokenUsage();
+    const { used, max, compacting } = this.agent.getTokenUsage();
     const pct = ((used / max) * 100).toFixed(1);
     const bar = this.buildBar(used, max, 20);
     const colour = used / max > 0.85 ? chalk.red : used / max > 0.60 ? chalk.yellow : chalk.gray;
-    console.log(colour(`   Context: ${bar} ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)\n`));
+    const compactingTag = compacting ? chalk.cyan(' [⏳ compacting...]') : '';
+    console.log(colour(`   Context: ${bar} ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)`) + compactingTag + '\n');
   }
 
   private buildBar(used: number, max: number, width: number): string {

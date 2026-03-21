@@ -17,11 +17,11 @@ async function main() {
     const token = await auth.authenticate();
     console.log(chalk.green('✓ GitHub authentication successful\n'));
 
-    // Step 2: Initialize Copilot with GPT-4o
-    console.log(chalk.cyan('Step 2: Connecting to GitHub Copilot (GPT-4o)...'));
-    const copilot = new CopilotClient(token);
-    await copilot.initialize('gpt-4o');
-    console.log(chalk.green('✓ Copilot connected with GPT-4o\n'));
+    // Step 2: Initialize Copilot SDK with GPT-4o
+    console.log(chalk.cyan('Step 2: Starting Copilot SDK (GPT-4o)...'));
+    const copilot = new CopilotClient();
+    await copilot.initialize('gpt-4o', token);
+    console.log(chalk.green('✓ Copilot SDK ready with GPT-4o\n'));
 
     // Step 3: Start Playwright MCP Server
     console.log(chalk.cyan('Step 3: Starting Playwright MCP Server...'));
