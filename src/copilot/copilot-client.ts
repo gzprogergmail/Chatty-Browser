@@ -45,8 +45,11 @@ export class CopilotClient {
 
   async initialize(model: string = 'gpt-4o', githubToken?: string) {
     this.model = model;
+    // Silence Node.js experimental warnings (e.g. node:sqlite) in the SDK's
+    // CLI subprocess, which inherits our process environment.
+    process.env.NODE_NO_WARNINGS = '1';
     // Pass the GitHub token so the SDK authenticates without needing `gh auth login`.
-    this.sdkClient = new SDKClient({ githubToken } as any);
+    this.sdkClient = new SDKClient({ githubToken });
     await this.sdkClient.start();
     console.log(chalk.gray('   Copilot SDK client started'));
   }
@@ -78,17 +81,17 @@ export class CopilotClient {
     const sdkTools = mcpTools.map(tool =>
       defineTool(tool.name, {
         description: tool.description,
-        parameters: tool.inputSchema as any,
+        parameters: tool.inputSchema as Record<string, unknown>,
         skipPermission: true,
-        handler: async (args: any) => callTool(tool.name, args),
-      } as any),
+        handler: async (args: unknown) => callTool(tool.name, args),
+      }),
     );
 
-    this.session = await (this.sdkClient as any).createSession({
+    this.session = await this.sdkClient!.createSession({
       model: this.model,
       tools: sdkTools,
       onPermissionRequest: approveAll,
-      ...(systemPrompt ? { systemMessage: { content: systemPrompt } } : {}),
+      ...(systemPrompt ? { systemMessage: { mode: 'replace' as const, content: systemPrompt } } : {}),
       infiniteSessions: {
         enabled: true,
         backgroundCompactionThreshold: 0.80,
@@ -97,13 +100,13 @@ export class CopilotClient {
     });
 
     // Track compaction for the token-usage bar
-    (this.session as any).on('session.compaction_start', () => {
+    this.session.on('session.compaction_start', () => {
       this.compacting = true;
     });
-    (this.session as any).on('session.compaction_complete', (event: any) => {
+    this.session.on('session.compaction_complete', (event) => {
       this.compacting = false;
-      if (event?.data?.tokensAfter != null) {
-        this.estimatedTokens = event.data.tokensAfter;
+      if (event.data.postCompactionTokens != null) {
+        this.estimatedTokens = event.data.postCompactionTokens;
       }
     });
   }
@@ -112,7 +115,7 @@ export class CopilotClient {
     if (!this.session) {
       throw new Error('No active session. Call createSession() first.');
     }
-    const response = await (this.session as any).sendAndWait({ prompt: message }, timeoutMs);
+    const response = await this.session.sendAndWait({ prompt: message }, timeoutMs);
     const content: string = response?.data?.content ?? '';
 
     // Running rough token estimate (4 chars ≈ 1 token)
