@@ -13,6 +13,9 @@ const LOG_DIR = path.join(
 const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB per file
 const MAX_FILES = 10;                    // oldest files are deleted beyond this
 
+// Ensures unique filenames even if two rotations happen in the same millisecond.
+let _fileSeq = 0;
+
 export type ToolLogType = 'call' | 'result';
 
 export interface ToolLogEntry {
@@ -47,9 +50,11 @@ class ToolLogger {
   }
 
   private openNewFile(): void {
-    // Use ISO timestamp in the filename; replace chars that are illegal on Windows.
-    const ts = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
-    this.filePath = path.join(LOG_DIR, `tool-calls-${ts}.jsonl`);
+    // Include a per-process sequence number so rapid rotations in the same
+    // millisecond still produce distinct filenames (and sort correctly).
+    const ts  = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
+    const seq = String(++_fileSeq).padStart(4, '0');
+    this.filePath = path.join(LOG_DIR, `tool-calls-${ts}-${seq}.jsonl`);
     this.fileBytes = 0;
 
     // Prune the oldest files so the total count stays at or below MAX_FILES.
