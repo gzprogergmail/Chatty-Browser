@@ -1,0 +1,33 @@
+{
+  "name": "self-contained-agent",
+  "version": "1.0.0",
+  "description": "CLI agent that controls browser via GitHub Copilot and Playwright MCP",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "demo": "node demo.js",
+    "test": "node test-components.js"
+  },
+  "bin": {
+    "agent": "./dist/index.js"
+  },
+  "keywords": ["cli", "agent", "mcp", "playwright", "copilot"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "axios": "^1.6.7",
+    "chalk": "^5.3.0",
+    "inquirer": "^9.2.15",
+    "open": "^10.0.3",
+    "playwright": "^1.41.2"
+  },
+  "devDependencies": {
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^20.11.19",
+    "typescript": "^5.3.3"
+  }
+}
