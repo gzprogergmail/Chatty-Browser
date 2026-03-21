@@ -88,4 +88,14 @@ If something goes wrong, explain the error and suggest alternatives.`;
 
     return result;
   }
+
+  /** Clear conversation history and start a fresh session. */
+  newSession() {
+    this.copilot.clearHistory();
+  }
+
+  /** Approximate token usage for the current conversation. */
+  getTokenUsage(): { used: number; max: number } {
+    return this.copilot.getTokenUsage();
+  }
 }

@@ -46,12 +46,21 @@ export class CLIInterface {
           continue;
         }
 
+        if (trimmedCommand.toLowerCase() === '/new') {
+          this.agent.newSession();
+          console.log(chalk.cyan('\n🆕 New session started. Conversation history cleared.\n'));
+          continue;
+        }
+
         // Execute the command through the agent
         console.log(chalk.gray('\n🤖 Agent: Processing...\n'));
         
         const response = await this.agent.executeCommand(trimmedCommand);
         
         console.log(chalk.green(`\n🤖 Agent: ${response}\n`));
+
+        // Show token usage after every response
+        this.showTokenUsage();
 
       } catch (error) {
         if ((error as any).isTtyError) {
@@ -74,9 +83,23 @@ export class CLIInterface {
     console.log(chalk.gray('    - "Take a screenshot"'));
     console.log(chalk.gray('    - "Fill in the form with my email"'));
     console.log('\n  Special commands:');
+    console.log('  • /new  - Start a new session (clears conversation history)');
     console.log('  • help  - Show this help message');
     console.log('  • clear - Clear the screen');
     console.log('  • exit  - Quit the application\n');
+  }
+
+  private showTokenUsage() {
+    const { used, max } = this.agent.getTokenUsage();
+    const pct = ((used / max) * 100).toFixed(1);
+    const bar = this.buildBar(used, max, 20);
+    const colour = used / max > 0.85 ? chalk.red : used / max > 0.60 ? chalk.yellow : chalk.gray;
+    console.log(colour(`   Context: ${bar} ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)\n`));
+  }
+
+  private buildBar(used: number, max: number, width: number): string {
+    const filled = Math.round((used / max) * width);
+    return '[' + '█'.repeat(filled) + '░'.repeat(width - filled) + ']';
   }
 
   stop() {
