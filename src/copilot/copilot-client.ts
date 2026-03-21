@@ -108,10 +108,10 @@ export class CopilotClient {
   private savedCallTool: ((name: string, args: any) => Promise<any>) | null = null;
   private savedSystemPrompt: string = '';
 
-  // Token usage estimation for the display bar
-  private estimatedTokens = 0;
+  // Token usage from SDK session.usage_info events
+  private sdkCurrentTokens = 0;
+  private sdkTokenLimit = 128_000; // fallback until first usage_info event
   private compacting = false;
-  private readonly MODEL_CONTEXT = 128_000; // GPT-4o native window
 
   async initialize(model: string = 'gpt-4o', githubToken?: string) {
     this.model = model;
@@ -142,7 +142,8 @@ export class CopilotClient {
       this.session = null;
     }
 
-    this.estimatedTokens = 0;
+    this.sdkCurrentTokens = 0;
+    this.sdkTokenLimit = 128_000;
     this.compacting = false;
 
     // Register MCP tools with the SDK.
@@ -160,6 +161,7 @@ export class CopilotClient {
     this.session = await this.sdkClient!.createSession({
       model: this.model,
       tools: sdkTools,
+      availableTools: [...mcpTools.map(t => t.name), 'web_fetch'],
       onPermissionRequest: permissionHandler,
       ...(systemPrompt ? { systemMessage: { mode: 'replace' as const, content: systemPrompt } } : {}),
       infiniteSessions: {
@@ -205,15 +207,16 @@ export class CopilotClient {
       },
     });
 
-    // Track compaction for the token-usage bar
+    // Track token usage and compaction via SDK events
+    this.session.on('session.usage_info', (event) => {
+      this.sdkCurrentTokens = event.data.currentTokens;
+      this.sdkTokenLimit = event.data.tokenLimit;
+    });
     this.session.on('session.compaction_start', () => {
       this.compacting = true;
     });
-    this.session.on('session.compaction_complete', (event) => {
+    this.session.on('session.compaction_complete', () => {
       this.compacting = false;
-      if (event.data.postCompactionTokens != null) {
-        this.estimatedTokens = event.data.postCompactionTokens;
-      }
     });
   }
 
@@ -223,10 +226,6 @@ export class CopilotClient {
     }
     const response = await this.session.sendAndWait({ prompt: message }, timeoutMs);
     const content: string = response?.data?.content ?? '';
-
-    // Running rough token estimate (4 chars ≈ 1 token)
-    this.estimatedTokens += Math.ceil((message.length + content.length) / 4);
-
     return content;
   }
 
@@ -238,7 +237,7 @@ export class CopilotClient {
   }
 
   getTokenUsage(): { used: number; max: number; compacting: boolean } {
-    return { used: this.estimatedTokens, max: this.MODEL_CONTEXT, compacting: this.compacting };
+    return { used: this.sdkCurrentTokens, max: this.sdkTokenLimit, compacting: this.compacting };
   }
 
   async stop(): Promise<void> {
