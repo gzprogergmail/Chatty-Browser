@@ -1,5 +1,75 @@
-import { CopilotClient as SDKClient, CopilotSession, defineTool, approveAll } from '@github/copilot-sdk';
+import { CopilotClient as SDKClient, CopilotSession, defineTool } from '@github/copilot-sdk';
+import type { PermissionHandler } from '@github/copilot-sdk';
+import inquirer from 'inquirer';
 import chalk from 'chalk';
+import { toolLogger } from './tool-logger.js';
+
+// ── Confirmation helper ────────────────────────────────────────────────────────
+
+async function confirmAction(message: string): Promise<boolean> {
+  const { ok } = await inquirer.prompt<{ ok: boolean }>([
+    { type: 'confirm', name: 'ok', message, default: false },
+  ]);
+  return ok;
+}
+
+// ── Tool-call display helpers ──────────────────────────────────────────────────
+
+/** Coloured icon + name label for a tool. */
+function toolLabel(name: string): string {
+  if (name.startsWith('browser_'))                                      return chalk.cyan(`🌐 ${name}`);
+  if (['bash', 'write_bash', 'read_bash', 'stop_bash', 'list_bash'].includes(name)) return chalk.magenta(`💻 ${name}`);
+  if (['str_replace_editor', 'grep', 'glob'].includes(name))            return chalk.yellow(`📁 ${name}`);
+  if (name === 'web_fetch')                                              return chalk.blue(`🔗 ${name}`);
+  return chalk.gray(`⚡ ${name}`);
+}
+
+/**
+ * Single-line JSON representation of tool args.
+ * Long string values are truncated to 80 characters to keep the line readable.
+ */
+function formatArgs(args: unknown): string {
+  if (args == null) return '';
+  try {
+    const trunc = (v: unknown): unknown => {
+      if (typeof v === 'string' && v.length > 80)
+        return v.slice(0, 80) + ` …(${v.length - 80} more)`;
+      if (Array.isArray(v)) return v.map(trunc);
+      if (typeof v === 'object' && v !== null)
+        return Object.fromEntries(
+          Object.entries(v as Record<string, unknown>).map(([k, v2]) => [k, trunc(v2)]),
+        );
+      return v;
+    };
+    return JSON.stringify(trunc(args));
+  } catch {
+    return String(args);
+  }
+}
+
+// ── Permission handler ────────────────────────────────────────────────────────
+// Auto-approves everything except disk READ and WRITE, which require explicit
+// user confirmation via an inline prompt.
+
+const permissionHandler: PermissionHandler = async (request) => {
+  const { kind } = request;
+  if (kind === 'read' || kind === 'write') {
+    const label = kind === 'write' ? 'WRITE' : 'READ';
+    // Surface any extra context the permission request carries (file path, etc.)
+    const extra = Object.entries(request)
+      .filter(([k]) => k !== 'kind' && k !== 'toolCallId')
+      .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+      .join(', ');
+    const ok = await confirmAction(
+      `Allow disk ${label} operation?${extra ? `  (${extra})` : ''}`,
+    );
+    return ok
+      ? { kind: 'approved' }
+      : { kind: 'denied-interactively-by-user', feedback: 'User denied disk access.' };
+  }
+  // Everything else (shell, mcp, url, custom-tool) is approved automatically.
+  return { kind: 'approved' };
+};
 
 /**
  * Shape of an MCP tool as returned by MCPServerManager.getTools().
@@ -90,12 +160,48 @@ export class CopilotClient {
     this.session = await this.sdkClient!.createSession({
       model: this.model,
       tools: sdkTools,
-      onPermissionRequest: approveAll,
+      onPermissionRequest: permissionHandler,
       ...(systemPrompt ? { systemMessage: { mode: 'replace' as const, content: systemPrompt } } : {}),
       infiniteSessions: {
         enabled: true,
         backgroundCompactionThreshold: 0.80,
         bufferExhaustionThreshold: 0.95,
+      },
+      hooks: {
+        // ── Pre-tool hook: print + log every call, confirm dangerous HTTP ──────
+        onPreToolUse: async ({ toolName, toolArgs }) => {
+          // 1. Print the tool invocation to the console in real-time.
+          process.stdout.write(
+            '\n   ' + toolLabel(toolName) + '  ' + chalk.gray(formatArgs(toolArgs)) + '\n',
+          );
+
+          // 2. Append a 'call' entry to the rotating JSONL log.
+          toolLogger.log({ type: 'call', tool: toolName, args: toolArgs });
+
+          // 3. For web_fetch: ask the user before executing state-changing
+          //    HTTP methods (POST, PUT, DELETE, PATCH).
+          if (toolName === 'web_fetch') {
+            const a = toolArgs as Record<string, unknown>;
+            const method = (typeof a?.method === 'string' ? a.method : 'GET').toUpperCase();
+            if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+              const url = typeof a?.url === 'string' ? a.url : JSON.stringify(a?.url);
+              const ok = await confirmAction(`Allow ${method} request to ${url}?`);
+              if (!ok) {
+                return {
+                  permissionDecision: 'deny' as const,
+                  permissionDecisionReason: 'User denied HTTP request.',
+                };
+              }
+            }
+          }
+
+          return { permissionDecision: 'allow' as const };
+        },
+
+        // ── Post-tool hook: log every result ────────────────────────────────
+        onPostToolUse: async ({ toolName, toolArgs, toolResult }) => {
+          toolLogger.log({ type: 'result', tool: toolName, args: toolArgs, result: toolResult });
+        },
       },
     });
 
