@@ -1,7 +1,7 @@
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { BrowserAgent } from '../agent/browser-agent.js';
-import type { ModelPresetId, ModelPresetStatus } from '../copilot/copilot-client.js';
+import type { AvailableModel } from '../copilot/copilot-client.js';
 
 export class CLIInterface {
   private running = false;
@@ -89,7 +89,7 @@ export class CLIInterface {
     console.log(chalk.gray('    - "Take a screenshot"'));
     console.log(chalk.gray('    - "Fill in the form with my email"'));
     console.log('\n  Special commands:');
-    console.log('  • /model - Choose the active model preset');
+    console.log('  • /model - Choose from the live Copilot model list');
     console.log('  • /new  - Start a new session (clears conversation history)');
     console.log('  • help  - Show this help message');
     console.log('  • clear - Clear the screen');
@@ -97,21 +97,21 @@ export class CLIInterface {
   }
 
   private async chooseModel() {
-    const presets = await this.agent.getModelPresetStatuses();
-    const { presetId } = await inquirer.prompt<{ presetId: ModelPresetId }>([
+    const models = await this.agent.getAvailableModels();
+    const { modelId } = await inquirer.prompt<{ modelId: string }>([
       {
         type: 'list',
-        name: 'presetId',
+        name: 'modelId',
         message: 'Choose model:',
-        choices: presets.map((preset) => ({
-          name: preset.available ? preset.label : `${preset.label} (unavailable)`,
-          value: preset.id,
-          disabled: preset.available ? false : 'Not available in this Copilot account',
+        pageSize: Math.min(15, Math.max(6, models.length)),
+        choices: models.map((model) => ({
+          name: model.label,
+          value: model.model,
         })),
       },
     ]);
 
-    const selected = await this.agent.setModelPreset(presetId);
+    const selected = await this.agent.setModel(modelId);
     console.log(chalk.cyan(`\n🔁 Model set to ${selected.label}\n`));
     if (selected.warning) {
       console.log(chalk.yellow(`   Note: ${selected.warning}\n`));

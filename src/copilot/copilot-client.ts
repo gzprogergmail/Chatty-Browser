@@ -1,5 +1,6 @@
 import { CopilotClient as SDKClient, CopilotSession, defineTool } from '@github/copilot-sdk';
 import type { PermissionHandler } from '@github/copilot-sdk';
+import type { ModelInfo } from '@github/copilot-sdk';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import path from 'path';
@@ -94,31 +95,17 @@ export interface MCPToolDef {
   inputSchema: any;
 }
 
-export type ModelPresetId = 'gpt-4o' | 'gpt-4.1' | 'gpt-5-mini' | 'haiku';
+type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 
-export interface ModelPreset {
-  id: ModelPresetId;
+export interface AvailableModel {
+  id: string;
   label: string;
   model: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  reasoningEffort?: ReasoningEffort;
+  supportsReasoningEffort: boolean;
+  supportedReasoningEfforts?: ReasoningEffort[];
   warning?: string;
 }
-
-export interface ModelPresetStatus extends ModelPreset {
-  available: boolean;
-}
-
-const MODEL_PRESETS: ModelPreset[] = [
-  { id: 'gpt-4o', label: 'GPT-4o', model: 'gpt-4o' },
-  { id: 'gpt-4.1', label: 'GPT-4.1', model: 'gpt-4.1' },
-  { id: 'gpt-5-mini', label: 'GPT-5 mini (medium)', model: 'gpt-5-mini', reasoningEffort: 'medium' },
-  {
-    id: 'haiku',
-    label: 'Claude Haiku 4.5',
-    model: 'claude-haiku-4.5',
-    warning: 'Copilot currently reports that Claude Haiku 4.5 does not support reasoning effort, so "medium" is not applied.',
-  },
-];
 
 /**
  * Wrapper around the official @github/copilot-sdk.
@@ -154,7 +141,6 @@ export class CopilotClient {
   private sdkTokenLimit = 128_000; // fallback until first usage_info event
   private compacting = false;
   private sdkMessagesLength = 0;
-  private activePrompt: string | null = null;
 
   async initialize(
     model: string = 'gpt-4.1',
@@ -204,7 +190,6 @@ export class CopilotClient {
     this.sdkTokenLimit = 128_000;
     this.compacting = false;
     this.sdkMessagesLength = 0;
-    this.activePrompt = null;
 
     // Register MCP tools with the SDK.
     // Screenshot results are kept intact — the model uses them to understand
@@ -338,14 +323,12 @@ export class CopilotClient {
     if (!this.session) {
       throw new Error('No active session. Call createSession() first.');
     }
-    this.activePrompt = message;
     process.stdout.write(
       chalk.gray(`   🧠 Queueing prompt for ${this.model}${this.reasoningEffort ? ` (${this.reasoningEffort})` : ''}`) + '\n',
     );
     const response = await this.session.sendAndWait({ prompt: message }, timeoutMs);
     const content: string = response?.data?.content ?? '';
     process.stdout.write(chalk.gray('   ✅ Turn complete') + '\n');
-    this.activePrompt = null;
     return content;
   }
 
@@ -356,31 +339,24 @@ export class CopilotClient {
     }
   }
 
-  async getModelPresetStatuses(): Promise<ModelPresetStatus[]> {
-    const availableModels = new Set(
-      (await this.sdkClient!.listModels()).map(model => model.id),
-    );
-
-    return MODEL_PRESETS.map(preset => ({
-      ...preset,
-      available: availableModels.has(preset.model),
-    }));
+  async getAvailableModels(): Promise<AvailableModel[]> {
+    const models = await this.sdkClient!.listModels();
+    return models
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((model) => this.toAvailableModel(model));
   }
 
-  async setModelPreset(presetId: ModelPresetId): Promise<ModelPresetStatus> {
-    const presets = await this.getModelPresetStatuses();
-    const preset = presets.find(candidate => candidate.id === presetId);
+  async setModel(modelId: string): Promise<AvailableModel> {
+    const models = await this.getAvailableModels();
+    const selected = models.find(candidate => candidate.model === modelId);
 
-    if (!preset) {
-      throw new Error(`Unknown model preset: ${presetId}`);
+    if (!selected) {
+      throw new Error(`${modelId} is not available in the current Copilot account.`);
     }
 
-    if (!preset.available) {
-      throw new Error(`${preset.label} is not available in the current Copilot account.`);
-    }
-
-    this.model = preset.model;
-    this.reasoningEffort = preset.reasoningEffort;
+    this.model = selected.model;
+    this.reasoningEffort = selected.reasoningEffort;
 
     if (this.session) {
       await this.session.setModel(
@@ -394,14 +370,14 @@ export class CopilotClient {
       kind: 'session.set_model',
       payload: {
         sessionId: this.session?.sessionId,
-        presetId: preset.id,
+        modelId: selected.id,
         model: this.model,
         reasoningEffort: this.reasoningEffort,
-        warning: preset.warning,
+        warning: selected.warning,
       },
     });
 
-    return preset;
+    return selected;
   }
 
   getTokenUsage(): { used: number; max: number; compacting: boolean } {
@@ -422,6 +398,37 @@ export class CopilotClient {
   private createTelemetryFilePath(): string {
     const ts = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
     return path.join(LOG_DIR, `copilot-otel-${ts}.jsonl`);
+  }
+
+  private toAvailableModel(model: ModelInfo): AvailableModel {
+    const supportsReasoningEffort = model.capabilities.supports.reasoningEffort;
+    const defaultReasoning = this.getPreferredReasoningEffort(model);
+    return {
+      id: model.id,
+      label: this.buildModelLabel(model, defaultReasoning),
+      model: model.id,
+      reasoningEffort: defaultReasoning,
+      supportsReasoningEffort,
+      supportedReasoningEfforts: model.supportedReasoningEfforts,
+      warning: this.getModelWarning(model, defaultReasoning),
+    };
+  }
+
+  private getPreferredReasoningEffort(model: ModelInfo): ReasoningEffort | undefined {
+    if (!model.capabilities.supports.reasoningEffort) return undefined;
+    if (model.supportedReasoningEfforts?.includes('medium')) return 'medium';
+    return model.defaultReasoningEffort;
+  }
+
+  private buildModelLabel(model: ModelInfo, reasoningEffort?: ReasoningEffort): string {
+    return reasoningEffort ? `${model.name} (${reasoningEffort})` : model.name;
+  }
+
+  private getModelWarning(model: ModelInfo, reasoningEffort?: ReasoningEffort): string | undefined {
+    if (/haiku/i.test(model.name) && !reasoningEffort) {
+      return `${model.name} does not advertise reasoning-effort support in Copilot, so no reasoning level is applied.`;
+    }
+    return undefined;
   }
 
   async stop(): Promise<void> {
