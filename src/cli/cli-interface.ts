@@ -1,6 +1,7 @@
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { BrowserAgent } from '../agent/browser-agent.js';
+import type { ModelPresetId, ModelPresetStatus } from '../copilot/copilot-client.js';
 
 export class CLIInterface {
   private running = false;
@@ -52,6 +53,11 @@ export class CLIInterface {
           continue;
         }
 
+        if (trimmedCommand.toLowerCase() === '/model') {
+          await this.chooseModel();
+          continue;
+        }
+
         // Execute the command through the agent
         console.log(chalk.gray('\n🤖 Agent: Processing...\n'));
         
@@ -83,10 +89,33 @@ export class CLIInterface {
     console.log(chalk.gray('    - "Take a screenshot"'));
     console.log(chalk.gray('    - "Fill in the form with my email"'));
     console.log('\n  Special commands:');
+    console.log('  • /model - Choose the active model preset');
     console.log('  • /new  - Start a new session (clears conversation history)');
     console.log('  • help  - Show this help message');
     console.log('  • clear - Clear the screen');
     console.log('  • exit  - Quit the application\n');
+  }
+
+  private async chooseModel() {
+    const presets = await this.agent.getModelPresetStatuses();
+    const { presetId } = await inquirer.prompt<{ presetId: ModelPresetId }>([
+      {
+        type: 'list',
+        name: 'presetId',
+        message: 'Choose model:',
+        choices: presets.map((preset) => ({
+          name: preset.available ? preset.label : `${preset.label} (unavailable)`,
+          value: preset.id,
+          disabled: preset.available ? false : 'Not available in this Copilot account',
+        })),
+      },
+    ]);
+
+    const selected = await this.agent.setModelPreset(presetId);
+    console.log(chalk.cyan(`\n🔁 Model set to ${selected.label}\n`));
+    if (selected.warning) {
+      console.log(chalk.yellow(`   Note: ${selected.warning}\n`));
+    }
   }
 
   private showTokenUsage() {

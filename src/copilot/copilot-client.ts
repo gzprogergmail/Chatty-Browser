@@ -54,6 +54,12 @@ function formatArgs(args: unknown): string {
   }
 }
 
+function summarizeText(value: string, max = 160): string {
+  const singleLine = value.replace(/\s+/g, ' ').trim();
+  if (singleLine.length <= max) return singleLine;
+  return singleLine.slice(0, max) + ` …(${singleLine.length - max} more)`;
+}
+
 // ── Permission handler ────────────────────────────────────────────────────────
 // Auto-approves everything except disk READ and WRITE, which require explicit
 // user confirmation via an inline prompt.
@@ -88,6 +94,32 @@ export interface MCPToolDef {
   inputSchema: any;
 }
 
+export type ModelPresetId = 'gpt-4o' | 'gpt-4.1' | 'gpt-5-mini' | 'haiku';
+
+export interface ModelPreset {
+  id: ModelPresetId;
+  label: string;
+  model: string;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  warning?: string;
+}
+
+export interface ModelPresetStatus extends ModelPreset {
+  available: boolean;
+}
+
+const MODEL_PRESETS: ModelPreset[] = [
+  { id: 'gpt-4o', label: 'GPT-4o', model: 'gpt-4o' },
+  { id: 'gpt-4.1', label: 'GPT-4.1', model: 'gpt-4.1' },
+  { id: 'gpt-5-mini', label: 'GPT-5 mini (medium)', model: 'gpt-5-mini', reasoningEffort: 'medium' },
+  {
+    id: 'haiku',
+    label: 'Claude Haiku 4.5',
+    model: 'claude-haiku-4.5',
+    warning: 'Copilot currently reports that Claude Haiku 4.5 does not support reasoning effort, so "medium" is not applied.',
+  },
+];
+
 /**
  * Wrapper around the official @github/copilot-sdk.
  *
@@ -108,8 +140,8 @@ export interface MCPToolDef {
 export class CopilotClient {
   private sdkClient: SDKClient | null = null;
   private session: CopilotSession | null = null;
-  private model: string = 'gpt-5-mini';
-  private reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | undefined = 'medium';
+  private model: string = 'gpt-4.1';
+  private reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | undefined = undefined;
   private telemetryFilePath: string | null = null;
 
   // Saved for /new session re-creation
@@ -122,14 +154,15 @@ export class CopilotClient {
   private sdkTokenLimit = 128_000; // fallback until first usage_info event
   private compacting = false;
   private sdkMessagesLength = 0;
+  private activePrompt: string | null = null;
 
   async initialize(
-    model: string = 'gpt-5-mini',
+    model: string = 'gpt-4.1',
     githubToken?: string,
     reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh',
   ) {
     this.model = model;
-    this.reasoningEffort = reasoningEffort ?? (model === 'gpt-5-mini' ? 'medium' : undefined);
+    this.reasoningEffort = reasoningEffort;
     // Silence Node.js experimental warnings (e.g. node:sqlite) in the SDK's
     // CLI subprocess, which inherits our process environment.
     process.env.NODE_NO_WARNINGS = '1';
@@ -171,6 +204,7 @@ export class CopilotClient {
     this.sdkTokenLimit = 128_000;
     this.compacting = false;
     this.sdkMessagesLength = 0;
+    this.activePrompt = null;
 
     // Register MCP tools with the SDK.
     // Screenshot results are kept intact — the model uses them to understand
@@ -192,6 +226,10 @@ export class CopilotClient {
       onPermissionRequest: permissionHandler,
       onEvent: (event) => {
         if (event.type === 'user.message') {
+          process.stdout.write(
+            chalk.gray(`   📨 Sent to LLM: ${summarizeText(event.data.content)}`) + '\n',
+          );
+
           llmPayloadLogger.log({
             direction: 'request',
             kind: event.type,
@@ -205,6 +243,13 @@ export class CopilotClient {
         }
 
         if (event.type === 'assistant.message') {
+          const summary = event.data.toolRequests?.length
+            ? `${summarizeText(event.data.content || '(tool planning)')} [${event.data.toolRequests.length} tool request${event.data.toolRequests.length === 1 ? '' : 's'}]`
+            : summarizeText(event.data.content || '(empty response)');
+          process.stdout.write(
+            chalk.gray(`   📩 LLM response received: ${summary}`) + '\n',
+          );
+
           llmPayloadLogger.log({
             direction: 'response',
             kind: event.type,
@@ -293,8 +338,14 @@ export class CopilotClient {
     if (!this.session) {
       throw new Error('No active session. Call createSession() first.');
     }
+    this.activePrompt = message;
+    process.stdout.write(
+      chalk.gray(`   🧠 Queueing prompt for ${this.model}${this.reasoningEffort ? ` (${this.reasoningEffort})` : ''}`) + '\n',
+    );
     const response = await this.session.sendAndWait({ prompt: message }, timeoutMs);
     const content: string = response?.data?.content ?? '';
+    process.stdout.write(chalk.gray('   ✅ Turn complete') + '\n');
+    this.activePrompt = null;
     return content;
   }
 
@@ -303,6 +354,54 @@ export class CopilotClient {
     if (this.savedCallTool) {
       await this.createSession(this.savedTools, this.savedCallTool, this.savedSystemPrompt);
     }
+  }
+
+  async getModelPresetStatuses(): Promise<ModelPresetStatus[]> {
+    const availableModels = new Set(
+      (await this.sdkClient!.listModels()).map(model => model.id),
+    );
+
+    return MODEL_PRESETS.map(preset => ({
+      ...preset,
+      available: availableModels.has(preset.model),
+    }));
+  }
+
+  async setModelPreset(presetId: ModelPresetId): Promise<ModelPresetStatus> {
+    const presets = await this.getModelPresetStatuses();
+    const preset = presets.find(candidate => candidate.id === presetId);
+
+    if (!preset) {
+      throw new Error(`Unknown model preset: ${presetId}`);
+    }
+
+    if (!preset.available) {
+      throw new Error(`${preset.label} is not available in the current Copilot account.`);
+    }
+
+    this.model = preset.model;
+    this.reasoningEffort = preset.reasoningEffort;
+
+    if (this.session) {
+      await this.session.setModel(
+        this.model,
+        this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : undefined,
+      );
+    }
+
+    llmPayloadLogger.log({
+      direction: 'request',
+      kind: 'session.set_model',
+      payload: {
+        sessionId: this.session?.sessionId,
+        presetId: preset.id,
+        model: this.model,
+        reasoningEffort: this.reasoningEffort,
+        warning: preset.warning,
+      },
+    });
+
+    return preset;
   }
 
   getTokenUsage(): { used: number; max: number; compacting: boolean } {

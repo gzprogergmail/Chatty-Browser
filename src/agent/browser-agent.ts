@@ -1,4 +1,5 @@
 import { CopilotClient } from '../copilot/copilot-client.js';
+import type { ModelPresetId, ModelPresetStatus } from '../copilot/copilot-client.js';
 import { MCPServerManager } from '../mcp/mcp-server-manager.js';
 import chalk from 'chalk';
 
@@ -49,6 +50,14 @@ If something goes wrong, explain the error and suggest alternatives.`;
   /** Start a fresh session (used by /new command). */
   async newSession(): Promise<void> {
     return this.copilot.newSession();
+  }
+
+  async getModelPresetStatuses(): Promise<ModelPresetStatus[]> {
+    return this.copilot.getModelPresetStatuses();
+  }
+
+  async setModelPreset(presetId: ModelPresetId): Promise<ModelPresetStatus> {
+    return this.copilot.setModelPreset(presetId);
   }
 
   /** Approximate token usage for the current conversation. */

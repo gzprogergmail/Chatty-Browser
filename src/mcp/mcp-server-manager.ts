@@ -1,7 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { spawn, ChildProcess } from 'child_process';
-import path from 'path';
 
 interface Tool {
   name: string;
@@ -11,7 +9,6 @@ interface Tool {
 
 export class MCPServerManager {
   private client: Client | null = null;
-  private serverProcess: ChildProcess | null = null;
   private tools: Tool[] = [];
   private browserLaunched = false;
 
@@ -19,7 +16,7 @@ export class MCPServerManager {
     // Start the Playwright MCP server via StdioClientTransport
     // The transport will handle spawning the process
     const serverCommand = 'npx';
-    const serverArgs = ['-y', '@playwright/mcp'];
+    const serverArgs = ['-y', '@playwright/mcp', '--browser', 'firefox', '--isolated'];
 
     // Set environment variables to force headed mode
     const env = {
@@ -52,6 +49,7 @@ export class MCPServerManager {
       const toolsResponse = await this.client.listTools();
       this.tools = toolsResponse.tools as Tool[];
 
+      console.log('   Playwright MCP configured for isolated Firefox sessions');
       console.log(`   Available MCP tools: ${this.tools.map(t => t.name).join(', ')}`);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
