@@ -2,7 +2,7 @@ import { CopilotClient as SDKClient, CopilotSession, defineTool } from '@github/
 import type { PermissionHandler } from '@github/copilot-sdk';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
-import { toolLogger } from './tool-logger.js';
+import { llmPayloadLogger, toolLogger } from './tool-logger.js';
 
 // ── Confirmation helper ────────────────────────────────────────────────────────
 
@@ -101,7 +101,8 @@ export interface MCPToolDef {
 export class CopilotClient {
   private sdkClient: SDKClient | null = null;
   private session: CopilotSession | null = null;
-  private model: string = 'gpt-4o';
+  private model: string = 'gpt-5-mini';
+  private reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | undefined = 'medium';
 
   // Saved for /new session re-creation
   private savedTools: MCPToolDef[] = [];
@@ -112,9 +113,15 @@ export class CopilotClient {
   private sdkCurrentTokens = 0;
   private sdkTokenLimit = 128_000; // fallback until first usage_info event
   private compacting = false;
+  private sdkMessagesLength = 0;
 
-  async initialize(model: string = 'gpt-4o', githubToken?: string) {
+  async initialize(
+    model: string = 'gpt-5-mini',
+    githubToken?: string,
+    reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh',
+  ) {
     this.model = model;
+    this.reasoningEffort = reasoningEffort ?? (model === 'gpt-5-mini' ? 'medium' : undefined);
     // Silence Node.js experimental warnings (e.g. node:sqlite) in the SDK's
     // CLI subprocess, which inherits our process environment.
     process.env.NODE_NO_WARNINGS = '1';
@@ -145,6 +152,7 @@ export class CopilotClient {
     this.sdkCurrentTokens = 0;
     this.sdkTokenLimit = 128_000;
     this.compacting = false;
+    this.sdkMessagesLength = 0;
 
     // Register MCP tools with the SDK.
     // Screenshot results are kept intact — the model uses them to understand
@@ -160,9 +168,37 @@ export class CopilotClient {
 
     this.session = await this.sdkClient!.createSession({
       model: this.model,
+      ...(this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : {}),
       tools: sdkTools,
       availableTools: [...mcpTools.map(t => t.name), 'web_fetch'],
       onPermissionRequest: permissionHandler,
+      onEvent: (event) => {
+        if (event.type === 'user.message') {
+          llmPayloadLogger.log({
+            direction: 'request',
+            kind: event.type,
+            payload: {
+              sessionId: this.session?.sessionId,
+              model: this.model,
+              reasoningEffort: this.reasoningEffort,
+              ...event.data,
+            },
+          });
+        }
+
+        if (event.type === 'assistant.message') {
+          llmPayloadLogger.log({
+            direction: 'response',
+            kind: event.type,
+            payload: {
+              sessionId: this.session?.sessionId,
+              model: this.model,
+              reasoningEffort: this.reasoningEffort,
+              ...event.data,
+            },
+          });
+        }
+      },
       ...(systemPrompt ? { systemMessage: { mode: 'replace' as const, content: systemPrompt } } : {}),
       infiniteSessions: {
         enabled: true,
@@ -173,6 +209,7 @@ export class CopilotClient {
         // ── Pre-tool hook: print + log every call, confirm dangerous HTTP ──────
         onPreToolUse: async ({ toolName, toolArgs }) => {
           // 1. Print the tool invocation to the console in real-time.
+          process.stdout.write(this.formatTokenUsageLine('Context before tool'));
           process.stdout.write(
             '\n   ' + toolLabel(toolName) + '  ' + chalk.gray(formatArgs(toolArgs)) + '\n',
           );
@@ -203,7 +240,20 @@ export class CopilotClient {
         // ── Post-tool hook: log every result ────────────────────────────────
         onPostToolUse: async ({ toolName, toolArgs, toolResult }) => {
           toolLogger.log({ type: 'result', tool: toolName, args: toolArgs, result: toolResult });
+          process.stdout.write(this.formatTokenUsageLine(`Context after ${toolName}`));
         },
+      },
+    });
+
+    llmPayloadLogger.log({
+      direction: 'request',
+      kind: 'session.create',
+      payload: {
+        sessionId: this.session.sessionId,
+        model: this.model,
+        reasoningEffort: this.reasoningEffort,
+        availableTools: [...mcpTools.map(t => t.name), 'web_fetch'],
+        systemPrompt,
       },
     });
 
@@ -211,6 +261,7 @@ export class CopilotClient {
     this.session.on('session.usage_info', (event) => {
       this.sdkCurrentTokens = event.data.currentTokens;
       this.sdkTokenLimit = event.data.tokenLimit;
+      this.sdkMessagesLength = event.data.messagesLength;
     });
     this.session.on('session.compaction_start', () => {
       this.compacting = true;
@@ -238,6 +289,17 @@ export class CopilotClient {
 
   getTokenUsage(): { used: number; max: number; compacting: boolean } {
     return { used: this.sdkCurrentTokens, max: this.sdkTokenLimit, compacting: this.compacting };
+  }
+
+  private formatTokenUsageLine(label: string): string {
+    const used = this.sdkCurrentTokens;
+    const max = this.sdkTokenLimit || 1;
+    const ratio = used / max;
+    const pct = (ratio * 100).toFixed(1);
+    const colour = ratio > 0.85 ? chalk.red : ratio > 0.60 ? chalk.yellow : chalk.gray;
+    const compactingTag = this.compacting ? chalk.cyan(' [compacting]') : '';
+    const messages = this.sdkMessagesLength > 0 ? `, ${this.sdkMessagesLength} msgs` : '';
+    return colour(`   ${label}: ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%${messages})`) + compactingTag + '\n';
   }
 
   async stop(): Promise<void> {

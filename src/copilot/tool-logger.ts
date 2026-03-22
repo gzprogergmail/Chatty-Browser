@@ -11,7 +11,6 @@ const LOG_DIR = path.join(
 );
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB per file
-const MAX_FILES = 10;                    // oldest files are deleted beyond this
 
 // Ensures unique filenames even if two rotations happen in the same millisecond.
 let _fileSeq = 0;
@@ -26,21 +25,29 @@ export interface ToolLogEntry {
   result?: unknown;
 }
 
-class ToolLogger {
+export interface LLMPayloadLogEntry {
+  ts: string;
+  direction: 'request' | 'response';
+  kind: string;
+  payload: unknown;
+}
+
+class RotatingJsonlLogger<TEntry extends { ts: string }> {
   private filePath: string | null = null;
   private fileBytes = 0;
 
-  constructor() {
-    // Create the logs directory up-front so it exists before the first write.
+  constructor(
+    private readonly filePrefix: string,
+    private readonly maxFiles: number,
+  ) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
   }
 
-  log(entry: Omit<ToolLogEntry, 'ts'>): void {
-    const full: ToolLogEntry = { ts: new Date().toISOString(), ...entry };
+  log(entry: Omit<TEntry, 'ts'>): void {
+    const full = { ts: new Date().toISOString(), ...entry } as TEntry;
     const line = JSON.stringify(full) + '\n';
     const lineBytes = Buffer.byteLength(line, 'utf8');
 
-    // Rotate when no file is open yet or the current one would exceed 10 MB.
     if (this.filePath === null || this.fileBytes + lineBytes > MAX_FILE_BYTES) {
       this.openNewFile();
     }
@@ -50,29 +57,37 @@ class ToolLogger {
   }
 
   private openNewFile(): void {
-    // Include a per-process sequence number so rapid rotations in the same
-    // millisecond still produce distinct filenames (and sort correctly).
-    const ts  = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
+    const ts = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
     const seq = String(++_fileSeq).padStart(4, '0');
-    this.filePath = path.join(LOG_DIR, `tool-calls-${ts}-${seq}.jsonl`);
+    this.filePath = path.join(LOG_DIR, `${this.filePrefix}-${ts}-${seq}.jsonl`);
     this.fileBytes = 0;
 
-    // Prune the oldest files so the total count stays at or below MAX_FILES.
-    // We read the list *before* the new file is created so we don't count it.
     const existing = fs.readdirSync(LOG_DIR)
-      .filter(f => f.startsWith('tool-calls-') && f.endsWith('.jsonl'))
-      .sort()                                   // ISO timestamps sort lexicographically
+      .filter(f => f.startsWith(`${this.filePrefix}-`) && f.endsWith('.jsonl'))
+      .sort()
       .map(f => path.join(LOG_DIR, f));
 
-    while (existing.length >= MAX_FILES) {
+    while (existing.length >= this.maxFiles) {
       fs.unlinkSync(existing.shift()!);
     }
   }
 
-  /** Return the path of the file currently being written to (for tests). */
   get currentFilePath(): string | null {
     return this.filePath;
   }
 }
 
+class ToolLogger extends RotatingJsonlLogger<ToolLogEntry> {
+  constructor() {
+    super('tool-calls', 10);
+  }
+}
+
+class LLMPayloadLogger extends RotatingJsonlLogger<LLMPayloadLogEntry> {
+  constructor() {
+    super('llm-payloads', 5);
+  }
+}
+
 export const toolLogger = new ToolLogger();
+export const llmPayloadLogger = new LLMPayloadLogger();
