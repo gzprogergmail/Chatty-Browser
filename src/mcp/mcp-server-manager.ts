@@ -16,7 +16,7 @@ export class MCPServerManager {
     // Start the Playwright MCP server via StdioClientTransport
     // The transport will handle spawning the process
     const serverCommand = 'npx';
-    const serverArgs = ['-y', '@playwright/mcp', '--browser', 'firefox', '--isolated'];
+    const serverArgs = ['-y', '@playwright/mcp', '--browser', 'chrome', '--isolated'];
 
     // Set environment variables to force headed mode
     const env = {
@@ -49,7 +49,7 @@ export class MCPServerManager {
       const toolsResponse = await this.client.listTools();
       this.tools = toolsResponse.tools as Tool[];
 
-      console.log('   Playwright MCP configured for isolated Firefox sessions');
+      console.log('   Playwright MCP configured for isolated Chrome sessions');
       console.log(`   Available MCP tools: ${this.tools.map(t => t.name).join(', ')}`);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
