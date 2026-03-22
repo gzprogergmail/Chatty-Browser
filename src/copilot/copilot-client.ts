@@ -2,7 +2,14 @@ import { CopilotClient as SDKClient, CopilotSession, defineTool } from '@github/
 import type { PermissionHandler } from '@github/copilot-sdk';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { llmPayloadLogger, toolLogger } from './tool-logger.js';
+
+const LOG_DIR = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../logs',
+);
 
 // ── Confirmation helper ────────────────────────────────────────────────────────
 
@@ -103,6 +110,7 @@ export class CopilotClient {
   private session: CopilotSession | null = null;
   private model: string = 'gpt-5-mini';
   private reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | undefined = 'medium';
+  private telemetryFilePath: string | null = null;
 
   // Saved for /new session re-creation
   private savedTools: MCPToolDef[] = [];
@@ -125,10 +133,20 @@ export class CopilotClient {
     // Silence Node.js experimental warnings (e.g. node:sqlite) in the SDK's
     // CLI subprocess, which inherits our process environment.
     process.env.NODE_NO_WARNINGS = '1';
+    this.telemetryFilePath = this.createTelemetryFilePath();
     // Pass the GitHub token so the SDK authenticates without needing `gh auth login`.
-    this.sdkClient = new SDKClient({ githubToken });
+    this.sdkClient = new SDKClient({
+      githubToken,
+      telemetry: {
+        exporterType: 'file',
+        filePath: this.telemetryFilePath,
+        captureContent: true,
+        sourceName: 'chatty-browser',
+      },
+    });
     await this.sdkClient.start();
     console.log(chalk.gray('   Copilot SDK client started'));
+    console.log(chalk.gray(`   Telemetry trace file: ${this.telemetryFilePath}`));
   }
 
   /**
@@ -300,6 +318,11 @@ export class CopilotClient {
     const compactingTag = this.compacting ? chalk.cyan(' [compacting]') : '';
     const messages = this.sdkMessagesLength > 0 ? `, ${this.sdkMessagesLength} msgs` : '';
     return colour(`   ${label}: ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%${messages})`) + compactingTag + '\n';
+  }
+
+  private createTelemetryFilePath(): string {
+    const ts = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
+    return path.join(LOG_DIR, `copilot-otel-${ts}.jsonl`);
   }
 
   async stop(): Promise<void> {
