@@ -255,6 +255,52 @@ await test('BrowserAgent follows explicit related memory edges during bounded re
   });
 });
 
+await test('BrowserAgent does not inject weakly related linked memories into the prompt', async () => {
+  await withTempManager('browser-agent-linked-precision-gate', async (memoryManager) => {
+    const first = memoryManager.saveMemory({
+      scope: 'workflow',
+      subject: 'invoice export',
+      summary: 'Always run verification before exporting invoices.',
+      tags: ['invoice', 'export'],
+      confidence: 0.92,
+    });
+    memoryManager.saveMemory({
+      scope: 'workflow',
+      subject: 'lunch schedule',
+      summary: 'Cafeteria staffing changes every Thursday afternoon.',
+      tags: ['cafeteria', 'staffing'],
+      confidence: 0.85,
+      relatedMemoryIds: [first.memoryId],
+    });
+
+    const captured = { prompts: [] };
+    const copilot = {
+      async sendMessage(prompt) {
+        captured.prompts.push(prompt);
+        return 'Precision gated memory context.';
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+    await agent.executeCommand('export invoices');
+
+    assert.equal(captured.prompts.length, 1);
+    assert.match(captured.prompts[0], /Always run verification before exporting invoices\./);
+    assert.doesNotMatch(captured.prompts[0], /Cafeteria staffing changes every Thursday afternoon\./);
+  });
+});
+
 await test('BrowserAgent sends the raw prompt when no relevant memory is found', async () => {
   await withTempManager('browser-agent-no-prefetch-hit', async (memoryManager) => {
     const captured = { prompts: [] };

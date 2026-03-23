@@ -29,18 +29,19 @@ interface PreflightMemoryLookup {
   hop1Queries: string[];
   hop2Queries: string[];
   linkedMemoryIds: number[];
+  retrievedMemoryIds: number[];
   memories: MemorySearchResult[];
   matchedQueries: string[];
 }
 
 export class BrowserAgent {
   private readonly preflightMemoryLimit = 3;
-  private readonly preflightMemoryFinalLimit = 5;
+  private readonly preflightMemoryFinalLimit = 3;
   private readonly preflightMemoryHopTwoQueryLimit = 5;
   private readonly preflightMemoryStopWords = new Set([
     'a', 'an', 'and', 'at', 'click', 'create', 'edit', 'fill', 'find', 'for', 'go', 'in',
     'launch', 'me', 'my', 'navigate', 'of', 'on', 'open', 'please', 'search', 'show', 'start',
-    'tell', 'the', 'to', 'use', 'with',
+    'tell', 'the', 'to', 'use', 'with', 'workflow', 'project', 'task', 'user', 'general', 'site',
   ]);
   private readonly systemPrompt = `You are a helpful AI assistant that controls a web browser using Playwright.
 You have access to various browser automation tools through the MCP (Model Context Protocol) server.
@@ -205,6 +206,7 @@ If something goes wrong, explain the error and suggest alternatives.`;
             hop1Queries: this.buildPreflightMemoryQueries(userCommand),
             hop2Queries: [],
             linkedMemoryIds: [],
+            retrievedMemoryIds: [],
             injectedCount: 0,
           },
         });
@@ -227,6 +229,7 @@ If something goes wrong, explain the error and suggest alternatives.`;
           hop1Queries: lookup.hop1Queries,
           hop2Queries: lookup.hop2Queries,
           linkedMemoryIds: lookup.linkedMemoryIds,
+          retrievedMemoryIds: lookup.retrievedMemoryIds,
           matchedQueries: lookup.matchedQueries,
           injectedCount: lookup.memories.length,
           memoryIds: lookup.memories.map((memory) => memory.id),
@@ -275,17 +278,32 @@ If something goes wrong, explain the error and suggest alternatives.`;
     );
     this.collectLinkedPreflightCandidates(linkedMemoryIds, candidates, () => seenOrder++);
 
+    const strongDirectCandidates = Array.from(candidates.values()).filter((candidate) => {
+      const overlap = this.countMeaningfulOverlap(userCommand, candidate.memory);
+      return candidate.hops.has(1) && candidate.score >= 70 && overlap >= 1;
+    });
+    const anchorTokens = new Set<string>(this.extractMeaningfulTokens(userCommand));
+    for (const candidate of strongDirectCandidates.slice(0, 2)) {
+      this.extractMemoryTokens(candidate.memory).forEach((token) => anchorTokens.add(token));
+    }
+
     const orderedCandidates = Array.from(candidates.values())
+      .filter((candidate) => this.shouldInjectMemoryCandidate(candidate, userCommand, anchorTokens, strongDirectCandidates.length > 0))
       .sort((a, b) => {
         if (a.score !== b.score) return b.score - a.score;
         return a.firstSeenOrder - b.firstSeenOrder;
       })
       .slice(0, this.preflightMemoryFinalLimit);
 
+    if (orderedCandidates.length === 0) {
+      return null;
+    }
+
     return {
       hop1Queries,
       hop2Queries,
       linkedMemoryIds,
+      retrievedMemoryIds: Array.from(candidates.keys()).sort((a, b) => a - b),
       memories: orderedCandidates.map((candidate) => candidate.memory),
       matchedQueries: Array.from(new Set(
         orderedCandidates.flatMap((candidate) => Array.from(candidate.matchedQueries)),
@@ -406,5 +424,58 @@ If something goes wrong, explain the error and suggest alternatives.`;
         firstSeenOrder: nextSeenOrder(),
       });
     });
+  }
+
+  private shouldInjectMemoryCandidate(
+    candidate: PreflightMemoryCandidate,
+    userCommand: string,
+    anchorTokens: Set<string>,
+    hasStrongDirectCandidate: boolean,
+  ): boolean {
+    const requestOverlap = this.countMeaningfulOverlap(userCommand, candidate.memory);
+    const anchorOverlap = this.countTokenOverlap(anchorTokens, this.extractMemoryTokens(candidate.memory));
+
+    if (candidate.hops.has(1)) {
+      return candidate.score >= 70 && requestOverlap >= 1;
+    }
+
+    if (!hasStrongDirectCandidate) {
+      return false;
+    }
+
+    return candidate.score >= 50 && (requestOverlap >= 1 || anchorOverlap >= 1);
+  }
+
+  private countMeaningfulOverlap(userCommand: string, memory: MemorySearchResult): number {
+    return this.countTokenOverlap(
+      new Set(this.extractMeaningfulTokens(userCommand)),
+      this.extractMemoryTokens(memory),
+    );
+  }
+
+  private countTokenOverlap(left: Set<string>, right: Set<string>): number {
+    let overlap = 0;
+    for (const token of left) {
+      if (right.has(token)) {
+        overlap++;
+      }
+    }
+    return overlap;
+  }
+
+  private extractMemoryTokens(memory: MemorySearchResult): Set<string> {
+    return new Set(this.extractMeaningfulTokens([
+      memory.subject,
+      memory.summary,
+      memory.detailsSnippet,
+      ...memory.tags,
+    ].filter(Boolean).join(' ')));
+  }
+
+  private extractMeaningfulTokens(text: string): string[] {
+    return Array.from(new Set(
+      (text.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+        .filter((token) => token.length >= 2 && !this.preflightMemoryStopWords.has(token)),
+    ));
   }
 }
