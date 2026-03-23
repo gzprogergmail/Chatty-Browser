@@ -209,6 +209,52 @@ await test('BrowserAgent uses bounded two-hop retrieval to expand related memory
   });
 });
 
+await test('BrowserAgent follows explicit related memory edges during bounded retrieval', async () => {
+  await withTempManager('browser-agent-linked-prefetch', async (memoryManager) => {
+    const first = memoryManager.saveMemory({
+      scope: 'workflow',
+      subject: 'invoice export',
+      summary: 'Always run verification before exporting invoices.',
+      tags: ['invoice', 'export'],
+      confidence: 0.92,
+    });
+    memoryManager.saveMemory({
+      scope: 'workflow',
+      subject: 'approval gate',
+      summary: 'Finance sign-off is required before the export can be finalized.',
+      tags: ['finance', 'approval'],
+      confidence: 0.85,
+      relatedMemoryIds: [first.memoryId],
+    });
+
+    const captured = { prompts: [] };
+    const copilot = {
+      async sendMessage(prompt) {
+        captured.prompts.push(prompt);
+        return 'Linked memory context.';
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+    await agent.executeCommand('export invoices');
+
+    assert.equal(captured.prompts.length, 1);
+    assert.match(captured.prompts[0], /Always run verification before exporting invoices\./);
+    assert.match(captured.prompts[0], /Finance sign-off is required before the export can be finalized\./);
+  });
+});
+
 await test('BrowserAgent sends the raw prompt when no relevant memory is found', async () => {
   await withTempManager('browser-agent-no-prefetch-hit', async (memoryManager) => {
     const captured = { prompts: [] };

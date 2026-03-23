@@ -28,6 +28,7 @@ interface PreflightMemoryCandidate {
 interface PreflightMemoryLookup {
   hop1Queries: string[];
   hop2Queries: string[];
+  linkedMemoryIds: number[];
   memories: MemorySearchResult[];
   matchedQueries: string[];
 }
@@ -203,6 +204,7 @@ If something goes wrong, explain the error and suggest alternatives.`;
             query: userCommand,
             hop1Queries: this.buildPreflightMemoryQueries(userCommand),
             hop2Queries: [],
+            linkedMemoryIds: [],
             injectedCount: 0,
           },
         });
@@ -224,6 +226,7 @@ If something goes wrong, explain the error and suggest alternatives.`;
           query: userCommand,
           hop1Queries: lookup.hop1Queries,
           hop2Queries: lookup.hop2Queries,
+          linkedMemoryIds: lookup.linkedMemoryIds,
           matchedQueries: lookup.matchedQueries,
           injectedCount: lookup.memories.length,
           memoryIds: lookup.memories.map((memory) => memory.id),
@@ -266,6 +269,11 @@ If something goes wrong, explain the error and suggest alternatives.`;
       new Set(hop1Queries),
     );
     this.collectPreflightCandidates(hop2Queries, 2, candidates, () => seenOrder++);
+    const linkedMemoryIds = this.buildLinkedMemoryIds(
+      Array.from(candidates.values()).map((candidate) => candidate.memory),
+      new Set(candidates.keys()),
+    );
+    this.collectLinkedPreflightCandidates(linkedMemoryIds, candidates, () => seenOrder++);
 
     const orderedCandidates = Array.from(candidates.values())
       .sort((a, b) => {
@@ -277,6 +285,7 @@ If something goes wrong, explain the error and suggest alternatives.`;
     return {
       hop1Queries,
       hop2Queries,
+      linkedMemoryIds,
       memories: orderedCandidates.map((candidate) => candidate.memory),
       matchedQueries: Array.from(new Set(
         orderedCandidates.flatMap((candidate) => Array.from(candidate.matchedQueries)),
@@ -349,5 +358,53 @@ If something goes wrong, explain the error and suggest alternatives.`;
     }
 
     return Array.from(new Set(queries)).slice(0, this.preflightMemoryHopTwoQueryLimit);
+  }
+
+  private buildLinkedMemoryIds(memories: MemorySearchResult[], seenMemoryIds: Set<number>): number[] {
+    const linkedIds: number[] = [];
+
+    for (const memory of memories) {
+      for (const relatedMemoryId of memory.relatedMemoryIds) {
+        if (seenMemoryIds.has(relatedMemoryId)) continue;
+        linkedIds.push(relatedMemoryId);
+      }
+    }
+
+    return Array.from(new Set(linkedIds)).slice(0, this.preflightMemoryHopTwoQueryLimit);
+  }
+
+  private collectLinkedPreflightCandidates(
+    memoryIds: number[],
+    candidates: Map<number, PreflightMemoryCandidate>,
+    nextSeenOrder: () => number,
+  ): void {
+    if (memoryIds.length === 0) return;
+
+    const results = this.memory.queryMemory({
+      memoryIds,
+      includeFullDetails: false,
+    });
+
+    results.memories.forEach((memory, index) => {
+      const existing = candidates.get(memory.id);
+      const weight = 58 - index * 4 + memory.confidence * 10 + (memory.status === 'active' ? 5 : 0);
+
+      if (existing) {
+        existing.score += weight + 8;
+        existing.hops.add(2);
+        existing.matchedQueries.add(`linked:${memory.id}`);
+        memory.tags.forEach((tag) => existing.matchedTags.add(tag));
+        return;
+      }
+
+      candidates.set(memory.id, {
+        memory,
+        score: weight,
+        hops: new Set([2]),
+        matchedQueries: new Set([`linked:${memory.id}`]),
+        matchedTags: new Set(memory.tags),
+        firstSeenOrder: nextSeenOrder(),
+      });
+    });
   }
 }

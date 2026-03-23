@@ -19,6 +19,7 @@ export interface SaveMemoryArgs {
   summary: string;
   details?: string;
   tags?: string[];
+  relatedMemoryIds?: number[];
   confidence?: number;
   source?: string;
   sourceSessionId?: string;
@@ -56,6 +57,7 @@ export interface MemorySearchResult {
   updatedAt: string;
   lastUsedAt?: string;
   lastVerifiedAt?: string;
+  relatedMemoryIds: number[];
   status: MemoryStatus;
   resolvedByMemoryId?: number;
   resolutionNote?: string;
@@ -72,6 +74,7 @@ export interface SaveMemoryResult {
   summary: string;
   tags: string[];
   confidence: number;
+  relatedMemoryIds: number[];
   memoryStatus: MemoryStatus;
   supersedesMemoryIds: number[];
   invalidatesMemoryIds: number[];
@@ -234,6 +237,11 @@ export class MemoryStore {
               items: { type: 'string' },
               description: 'Optional short tags to help future retrieval.',
             },
+            relatedMemoryIds: {
+              type: 'array',
+              items: { type: 'integer' },
+              description: 'Optional related memory IDs that should travel with this memory during retrieval.',
+            },
             confidence: {
               type: 'number',
               minimum: 0,
@@ -366,6 +374,7 @@ export class MemoryStore {
     const tags = this.normalizeTags(args.tags);
     const tagsJson = JSON.stringify(tags);
     const tagsText = tags.join(' ');
+    const relatedMemoryIds = this.normalizeMemoryIds(args.relatedMemoryIds);
     const confidence = this.normalizeConfidence(args.confidence);
     const source = this.normalizeOptionalText(args.source) ?? null;
     const sourceSessionId = this.normalizeOptionalText(args.sourceSessionId) ?? null;
@@ -436,6 +445,7 @@ export class MemoryStore {
     }
 
     this.resolveConflictingMemories(memoryId, supersedesMemoryIds, invalidatesMemoryIds, invalidationReason, now);
+    this.replaceRelatedMemoryEdges(memoryId, relatedMemoryIds, now);
     this.replaceFtsEntry(memoryId);
 
     return {
@@ -446,6 +456,7 @@ export class MemoryStore {
       summary,
       tags,
       confidence,
+      relatedMemoryIds,
       memoryStatus,
       supersedesMemoryIds,
       invalidatesMemoryIds,
@@ -646,6 +657,20 @@ export class MemoryStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS memory_edges (
+        memory_id_a INTEGER NOT NULL,
+        memory_id_b INTEGER NOT NULL,
+        relation TEXT NOT NULL DEFAULT 'related',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (memory_id_a, memory_id_b, relation),
+        FOREIGN KEY (memory_id_a) REFERENCES memories(id) ON DELETE CASCADE,
+        FOREIGN KEY (memory_id_b) REFERENCES memories(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_edges_a ON memory_edges(memory_id_a, relation);
+      CREATE INDEX IF NOT EXISTS idx_memory_edges_b ON memory_edges(memory_id_b, relation);
     `);
 
     this.migrateMemoriesTable();
@@ -711,6 +736,26 @@ export class MemoryStore {
         now,
         ...invalidatedIds,
       );
+    }
+  }
+
+  private replaceRelatedMemoryEdges(memoryId: number, relatedMemoryIds: number[], now: string): void {
+    this.db.prepare(
+      `DELETE FROM memory_edges
+       WHERE relation = 'related' AND (memory_id_a = ? OR memory_id_b = ?)`,
+    ).run(memoryId, memoryId);
+
+    for (const relatedId of relatedMemoryIds.filter((id) => id !== memoryId)) {
+      const memoryIdA = Math.min(memoryId, relatedId);
+      const memoryIdB = Math.max(memoryId, relatedId);
+      if (memoryIdA === memoryIdB) continue;
+
+      this.db.prepare(
+        `INSERT INTO memory_edges (memory_id_a, memory_id_b, relation, created_at, updated_at)
+         VALUES (?, ?, 'related', ?, ?)
+         ON CONFLICT(memory_id_a, memory_id_b, relation)
+         DO UPDATE SET updated_at = excluded.updated_at`,
+      ).run(memoryIdA, memoryIdB, now, now);
     }
   }
 
@@ -824,7 +869,13 @@ export class MemoryStore {
       .slice(0, options.limit);
 
     this.touchMemories(ordered.map(item => item.row.id));
-    return ordered.map(item => this.toSearchResult(item.row, item.matchReasons, options.includeFullDetails));
+    const relatedIds = this.loadRelatedMemoryIds(ordered.map((item) => item.row.id));
+    return ordered.map((item) => this.toSearchResult(
+      item.row,
+      item.matchReasons,
+      options.includeFullDetails,
+      relatedIds.get(item.row.id) ?? [],
+    ));
   }
 
   private readMemories(memoryIds: number[], includeFullDetails: boolean): MemorySearchResult[] {
@@ -834,10 +885,16 @@ export class MemoryStore {
     ).all(...memoryIds) as MemoryRow[];
 
     this.touchMemories(rows.map(row => row.id));
-    return rows.map((row) => this.toSearchResult(row, new Set(['read']), includeFullDetails));
+    const relatedIds = this.loadRelatedMemoryIds(rows.map((row) => row.id));
+    return rows.map((row) => this.toSearchResult(row, new Set(['read']), includeFullDetails, relatedIds.get(row.id) ?? []));
   }
 
-  private toSearchResult(row: MemoryRow, matchReasons: Set<string>, includeFullDetails: boolean): MemorySearchResult {
+  private toSearchResult(
+    row: MemoryRow,
+    matchReasons: Set<string>,
+    includeFullDetails: boolean,
+    relatedMemoryIds: number[],
+  ): MemorySearchResult {
     return {
       id: row.id,
       scope: row.scope,
@@ -853,6 +910,7 @@ export class MemoryStore {
       updatedAt: row.updated_at,
       lastUsedAt: row.last_used_at ?? undefined,
       lastVerifiedAt: row.last_verified_at ?? undefined,
+      relatedMemoryIds,
       status: row.status,
       resolvedByMemoryId: row.resolved_by_memory_id ?? undefined,
       resolutionNote: row.resolution_note ?? undefined,
@@ -860,6 +918,42 @@ export class MemoryStore {
       invalidatesMemoryIds: this.parseIds(row.invalidates_json),
       matchReasons: Array.from(matchReasons),
     };
+  }
+
+  private loadRelatedMemoryIds(memoryIds: number[]): Map<number, number[]> {
+    const uniqueIds = Array.from(new Set(memoryIds.filter((id) => Number.isInteger(id) && id > 0)));
+    const relatedByMemoryId = new Map<number, number[]>();
+
+    for (const memoryId of uniqueIds) {
+      relatedByMemoryId.set(memoryId, []);
+    }
+
+    if (uniqueIds.length === 0) {
+      return relatedByMemoryId;
+    }
+
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    const rows = this.db.prepare(
+      `SELECT memory_id_a, memory_id_b
+       FROM memory_edges
+       WHERE relation = 'related'
+         AND (memory_id_a IN (${placeholders}) OR memory_id_b IN (${placeholders}))`,
+    ).all(...uniqueIds, ...uniqueIds) as Array<{ memory_id_a: number; memory_id_b: number }>;
+
+    for (const row of rows) {
+      if (relatedByMemoryId.has(row.memory_id_a)) {
+        relatedByMemoryId.get(row.memory_id_a)!.push(row.memory_id_b);
+      }
+      if (relatedByMemoryId.has(row.memory_id_b)) {
+        relatedByMemoryId.get(row.memory_id_b)!.push(row.memory_id_a);
+      }
+    }
+
+    for (const [memoryId, relatedIds] of relatedByMemoryId.entries()) {
+      relatedByMemoryId.set(memoryId, Array.from(new Set(relatedIds)).sort((a, b) => a - b));
+    }
+
+    return relatedByMemoryId;
   }
 
   private replaceFtsEntry(memoryId: number): void {

@@ -176,6 +176,39 @@ await test('MemoryStore can explicitly invalidate older memories', async () => {
   });
 });
 
+await test('MemoryStore persists related memory edges and returns them in query results', async () => {
+  await withTempStore('related-memory-edges', async (_dir, dbPath) => {
+    const store = new MemoryStore(dbPath);
+
+    try {
+      const first = store.saveMemory({
+        scope: 'workflow',
+        subject: 'invoice export',
+        summary: 'Always run verification before exporting invoices.',
+        tags: ['invoice', 'export', 'verification'],
+      });
+
+      const second = store.saveMemory({
+        scope: 'workflow',
+        subject: 'totals check',
+        summary: 'Check totals before finalizing the workflow.',
+        tags: ['verification', 'totals'],
+        relatedMemoryIds: [first.memoryId],
+      });
+
+      assert.deepStrictEqual(second.relatedMemoryIds, [first.memoryId]);
+
+      const firstRead = store.queryMemory({ memoryIds: [first.memoryId], includeFullDetails: true }).memories[0];
+      const secondRead = store.queryMemory({ memoryIds: [second.memoryId], includeFullDetails: true }).memories[0];
+
+      assert.deepStrictEqual(firstRead.relatedMemoryIds, [second.memoryId]);
+      assert.deepStrictEqual(secondRead.relatedMemoryIds, [first.memoryId]);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 await test('MemoryManager runs the sidekick distiller asynchronously and persists corrections', async () => {
   await withTempStore('sidekick-distillation', async (_dir, dbPath) => {
     let distillerCalls = 0;
