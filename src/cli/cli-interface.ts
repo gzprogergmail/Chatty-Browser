@@ -7,7 +7,8 @@ import type { MemorySidekickStatus } from '../memory/memory-store.js';
 export class CLIInterface {
   private running = false;
   private activeTurn = false;
-  private pendingMemoryFeedback: MemorySidekickStatus | null = null;
+  private promptActive = false;
+  private pendingMemoryFeedback: MemorySidekickStatus[] = [];
   private lastMemoryFeedbackKey: string | null = null;
   private lastAnnouncedRunAt: string | null = null;
   private readonly unsubscribeMemoryStatus: () => void;
@@ -15,8 +16,8 @@ export class CLIInterface {
   constructor(private agent: BrowserAgent) {
     this.unsubscribeMemoryStatus = typeof this.agent.onMemorySidekickStatusChange === 'function'
       ? this.agent.onMemorySidekickStatusChange((status) => {
-          if (this.activeTurn) {
-            this.pendingMemoryFeedback = status;
+          if (this.activeTurn || this.promptActive) {
+            this.pendingMemoryFeedback.push(status);
             return;
           }
 
@@ -32,6 +33,7 @@ export class CLIInterface {
 
     while (this.running) {
       try {
+        this.promptActive = true;
         const { command } = await inquirer.prompt([
           {
             type: 'input',
@@ -40,6 +42,8 @@ export class CLIInterface {
             prefix: '',
           },
         ]);
+        this.promptActive = false;
+        this.flushPendingMemoryFeedback();
 
         const trimmedCommand = command.trim();
 
@@ -109,6 +113,7 @@ export class CLIInterface {
 
       } catch (error) {
         this.activeTurn = false;
+        this.promptActive = false;
         this.flushPendingMemoryFeedback();
         if ((error as any).isTtyError) {
           console.error(chalk.red('CLI could not be rendered in this environment'));
@@ -185,10 +190,10 @@ export class CLIInterface {
   }
 
   private flushPendingMemoryFeedback() {
-    if (!this.pendingMemoryFeedback) return;
+    if (this.pendingMemoryFeedback.length === 0) return;
     const pending = this.pendingMemoryFeedback;
-    this.pendingMemoryFeedback = null;
-    this.maybeRenderMemoryFeedback(pending);
+    this.pendingMemoryFeedback = [];
+    pending.forEach((status) => this.maybeRenderMemoryFeedback(status));
   }
 
   private maybeRenderMemoryFeedback(status: MemorySidekickStatus) {

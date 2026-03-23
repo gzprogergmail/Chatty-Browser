@@ -43,6 +43,15 @@ export interface QueryMemoryArgs {
   status?: MemoryStatus | MemoryStatus[];
 }
 
+export interface DeepSearchHistoryArgs {
+  query?: string;
+  queries?: string[];
+  role?: ConversationRole;
+  limit?: number;
+  includeFullContent?: boolean;
+  messageIds?: number[];
+}
+
 export interface MemorySearchResult {
   id: number;
   scope: string;
@@ -64,6 +73,18 @@ export interface MemorySearchResult {
   resolutionNote?: string;
   supersedesMemoryIds: number[];
   invalidatesMemoryIds: number[];
+  matchReasons: string[];
+}
+
+export interface ConversationHistorySearchResult {
+  id: number;
+  role: ConversationRole;
+  content?: string;
+  contentSnippet: string;
+  tokenEstimate: number;
+  createdAt: string;
+  sessionId?: string;
+  source?: string;
   matchReasons: string[];
 }
 
@@ -97,6 +118,20 @@ export interface QueryMemoryResult {
   };
   summary?: string;
   memories: MemorySearchResult[];
+}
+
+export interface DeepSearchHistoryResult {
+  mode: 'history-search' | 'history-read';
+  count: number;
+  query?: string;
+  attemptedQueries?: string[];
+  filters?: {
+    role?: ConversationRole;
+    includeFullContent: boolean;
+    limit: number;
+  };
+  summary?: string;
+  messages: ConversationHistorySearchResult[];
 }
 
 export interface ConversationMessageInput {
@@ -186,6 +221,11 @@ interface RankedMemory {
   hasFtsMatch: boolean;
   ftsRank: number;
   matchReasons: Set<string>;
+}
+
+interface RankedConversationMessage {
+  message: ConversationHistorySearchResult;
+  score: number;
 }
 
 const MEMORY_SCOPES: MemoryScope[] = ['site', 'workflow', 'user', 'project', 'task', 'general'];
@@ -349,6 +389,46 @@ export class MemoryStore {
           additionalProperties: false,
         },
       },
+      {
+        name: 'deep_search_history',
+        description: 'Search archived conversation history directly. This is slower and noisier than query_memory, but it can recover older findings that never made it into durable memory.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Natural language query for archived conversation history.',
+            },
+            queries: {
+              type: 'array',
+              items: { type: 'string' },
+              maxItems: 5,
+              description: 'Optional alternate phrasings to try across archived conversation history.',
+            },
+            role: {
+              type: 'string',
+              enum: ['user', 'assistant', 'tool', 'system'],
+              description: 'Optional role filter to search only user, assistant, tool, or system messages.',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: MAX_LIMIT,
+              description: 'How many archived message hits to return.',
+            },
+            includeFullContent: {
+              type: 'boolean',
+              description: 'When true, include the full archived message content instead of just snippets.',
+            },
+            messageIds: {
+              type: 'array',
+              items: { type: 'integer' },
+              description: 'Optional explicit archived message IDs to load directly.',
+            },
+          },
+          additionalProperties: false,
+        },
+      },
     ];
   }
 
@@ -362,6 +442,8 @@ export class MemoryStore {
         return this.saveMemory(args as SaveMemoryArgs);
       case 'query_memory':
         return this.queryMemory(args as QueryMemoryArgs);
+      case 'deep_search_history':
+        return this.deepSearchHistory(args as DeepSearchHistoryArgs);
       default:
         throw new Error(`Unknown memory tool: ${name}`);
     }
@@ -536,6 +618,60 @@ export class MemoryStore {
     };
   }
 
+  deepSearchHistory(args: DeepSearchHistoryArgs): DeepSearchHistoryResult {
+    const includeFullContent = args.includeFullContent === true;
+    const limit = this.normalizeLimit(args.limit);
+    const messageIds = this.normalizeMemoryIds(args.messageIds);
+    const role = args.role ? this.normalizeConversationRole(args.role) : undefined;
+
+    if (messageIds.length > 0) {
+      const messages = this.readConversationMessagesById(messageIds, includeFullContent);
+      return {
+        mode: 'history-read',
+        count: messages.length,
+        filters: {
+          ...(role ? { role } : {}),
+          includeFullContent,
+          limit,
+        },
+        summary: messages.length > 0
+          ? `Loaded ${messages.length} archived conversation message${messages.length === 1 ? '' : 's'} by ID.`
+          : 'No archived conversation messages matched those IDs.',
+        messages,
+      };
+    }
+
+    const attemptedQueries = this.normalizeQueryList(args.query, args.queries);
+    const messages = attemptedQueries.length > 0
+      ? this.searchConversationHistoryAcrossQueries({
+          queries: attemptedQueries,
+          role,
+          limit,
+          includeFullContent,
+        })
+      : [];
+
+    return {
+      mode: 'history-search',
+      count: messages.length,
+      query: attemptedQueries[0],
+      attemptedQueries,
+      filters: {
+        ...(role ? { role } : {}),
+        includeFullContent,
+        limit,
+      },
+      summary: messages.length > 0
+        ? attemptedQueries.length > 1
+          ? `Found ${messages.length} archived conversation hit${messages.length === 1 ? '' : 's'} across ${attemptedQueries.length} search variants.`
+          : `Found ${messages.length} archived conversation hit${messages.length === 1 ? '' : 's'} in the deeper history search.`
+        : attemptedQueries.length > 1
+          ? `No archived conversation hits matched across ${attemptedQueries.length} search variants.`
+          : 'No archived conversation hits matched the deeper history search.',
+      messages,
+    };
+  }
+
   appendConversationMessage(input: ConversationMessageInput): ArchivedConversationMessage {
     const content = this.requireText(input.content, 'content');
     const role = this.normalizeConversationRole(input.role);
@@ -554,8 +690,18 @@ export class MemoryStore {
       sessionId ?? null,
       source ?? null,
     );
+    const messageId = Number(result.lastInsertRowid);
+    this.db.prepare(
+      `INSERT INTO conversation_messages_fts (rowid, role, content, source)
+       VALUES (?, ?, ?, ?)`,
+    ).run(
+      messageId,
+      role,
+      content,
+      source ?? '',
+    );
     return {
-      id: Number(result.lastInsertRowid),
+      id: messageId,
       role,
       content,
       tokenEstimate,
@@ -676,6 +822,14 @@ export class MemoryStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_conversation_messages_id ON conversation_messages(id);
+      CREATE INDEX IF NOT EXISTS idx_conversation_messages_role ON conversation_messages(role);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS conversation_messages_fts USING fts5(
+        role,
+        content,
+        source,
+        tokenize = 'unicode61'
+      );
 
       CREATE TABLE IF NOT EXISTS memory_runtime_state (
         key TEXT PRIMARY KEY,
@@ -698,6 +852,7 @@ export class MemoryStore {
     `);
 
     this.migrateMemoriesTable();
+    this.rebuildConversationMessageFtsIfNeeded();
   }
 
   private migrateMemoriesTable(): void {
@@ -1186,6 +1341,226 @@ export class MemoryStore {
     return `${singleLine.slice(0, maxLength)}…`;
   }
 
+  private rebuildConversationMessageFtsIfNeeded(): void {
+    this.db.exec(`
+      INSERT INTO conversation_messages_fts (rowid, role, content, source)
+      SELECT message.id, message.role, message.content, COALESCE(message.source, '')
+      FROM conversation_messages message
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM conversation_messages_fts fts
+        WHERE fts.rowid = message.id
+      );
+    `);
+  }
+
+  private searchConversationHistoryAcrossQueries(options: {
+    queries: string[];
+    role?: ConversationRole;
+    limit: number;
+    includeFullContent: boolean;
+  }): ConversationHistorySearchResult[] {
+    const merged = new Map<number, { message: ConversationHistorySearchResult; score: number; firstSeenOrder: number }>();
+    let seenOrder = 0;
+
+    for (const query of options.queries) {
+      const results = this.searchConversationHistory({
+        query,
+        role: options.role,
+        limit: options.limit,
+        includeFullContent: options.includeFullContent,
+      });
+
+      results.forEach((message, index) => {
+        const existing = merged.get(message.id);
+        const weight = 100 - index * 10 + (message.role === 'assistant' ? 8 : 0);
+
+        if (existing) {
+          existing.score += weight + 10;
+          existing.message.matchReasons = Array.from(new Set([...existing.message.matchReasons, ...message.matchReasons]));
+          return;
+        }
+
+        merged.set(message.id, {
+          message,
+          score: weight,
+          firstSeenOrder: seenOrder++,
+        });
+      });
+    }
+
+    return Array.from(merged.values())
+      .sort((a, b) => {
+        if (a.score !== b.score) return b.score - a.score;
+        return a.firstSeenOrder - b.firstSeenOrder;
+      })
+      .slice(0, options.limit)
+      .map((entry) => entry.message);
+  }
+
+  private searchConversationHistory(options: {
+    query: string;
+    role?: ConversationRole;
+    limit: number;
+    includeFullContent: boolean;
+  }): ConversationHistorySearchResult[] {
+    const query = this.normalizeOptionalText(options.query);
+    if (!query) return [];
+
+    const tokens = this.extractSearchTokens(query);
+    const fetchLimit = Math.max(options.limit * 6, 20);
+    const loweredQuery = query.toLowerCase();
+    const filterParts: string[] = [];
+    const filterParams: Array<string | number> = [];
+
+    if (options.role) {
+      filterParts.push('m.role = ?');
+      filterParams.push(options.role);
+    }
+
+    const phrasePattern = `%${loweredQuery}%`;
+    const coverageSqlParts = [
+      'lower(m.content) LIKE ?',
+      'lower(COALESCE(m.source, \'\')) LIKE ?',
+    ];
+    const coverageParams: Array<string | number> = [phrasePattern, phrasePattern];
+
+    for (const token of tokens) {
+      const pattern = `%${token.toLowerCase()}%`;
+      coverageSqlParts.push('lower(m.content) LIKE ?');
+      coverageParams.push(pattern);
+    }
+
+    const rows = this.db.prepare(
+      `SELECT id, role, content, token_estimate, created_at, session_id, source
+       FROM conversation_messages m
+       WHERE (${coverageSqlParts.join(' OR ')})${filterParts.length > 0 ? ` AND ${filterParts.join(' AND ')}` : ''}
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    ).all(...coverageParams, ...filterParams, fetchLimit) as Array<{
+      id: number;
+      role: ConversationRole;
+      content: string;
+      token_estimate: number;
+      created_at: string;
+      session_id: string | null;
+      source: string | null;
+    }>;
+
+    const bigrams = this.extractQueryNgrams(tokens, 2);
+    const ranked: RankedConversationMessage[] = [];
+
+    for (const row of rows) {
+      const lowerContent = row.content.toLowerCase();
+      const lowerSource = (row.source ?? '').toLowerCase();
+      const matchedTokens = tokens.filter((token) => lowerContent.includes(token) || lowerSource.includes(token));
+      const matchedBigrams = bigrams.filter((bigram) => lowerContent.includes(bigram) || lowerSource.includes(bigram));
+      const hasPhrase = lowerContent.includes(loweredQuery) || lowerSource.includes(loweredQuery);
+      const coverage = tokens.length > 0 ? matchedTokens.length / tokens.length : 0;
+      const score = (hasPhrase ? 50 : 0)
+        + matchedTokens.length * 12
+        + matchedBigrams.length * 10
+        + coverage * 25
+        + (row.role === 'assistant' ? 5 : 0);
+
+      const hasEnoughCoverage = hasPhrase
+        || tokens.length <= 1
+        || coverage >= 0.5
+        || matchedBigrams.length > 0;
+      if (!hasEnoughCoverage || score <= 0) {
+        continue;
+      }
+
+      ranked.push({
+        message: {
+          id: row.id,
+          role: row.role,
+          ...(options.includeFullContent ? { content: row.content } : {}),
+          contentSnippet: this.buildConversationSnippet(row.content, tokens, loweredQuery),
+          tokenEstimate: row.token_estimate,
+          createdAt: row.created_at,
+          ...(row.session_id ? { sessionId: row.session_id } : {}),
+          ...(row.source ? { source: row.source } : {}),
+          matchReasons: Array.from(new Set([
+            ...(hasPhrase ? ['phrase'] : []),
+            ...(matchedBigrams.length > 0 ? ['ngram'] : []),
+            ...(matchedTokens.length > 0 ? ['token'] : []),
+          ])),
+        },
+        score,
+      });
+    }
+
+    return ranked
+      .sort((a, b) => {
+        if (a.score !== b.score) return b.score - a.score;
+        return this.compareIsoDateDesc(a.message.createdAt, b.message.createdAt);
+      })
+      .slice(0, options.limit)
+      .map((entry) => entry.message);
+  }
+
+  private readConversationMessagesById(messageIds: number[], includeFullContent: boolean): ConversationHistorySearchResult[] {
+    if (messageIds.length === 0) return [];
+    const placeholders = messageIds.map(() => '?').join(', ');
+    const rows = this.db.prepare(
+      `SELECT id, role, content, token_estimate, created_at, session_id, source
+       FROM conversation_messages
+       WHERE id IN (${placeholders})
+       ORDER BY id ASC`,
+    ).all(...messageIds) as Array<{
+      id: number;
+      role: ConversationRole;
+      content: string;
+      token_estimate: number;
+      created_at: string;
+      session_id: string | null;
+      source: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      role: row.role,
+      ...(includeFullContent ? { content: row.content } : {}),
+      contentSnippet: this.buildConversationSnippet(row.content, [], ''),
+      tokenEstimate: row.token_estimate,
+      createdAt: row.created_at,
+      ...(row.session_id ? { sessionId: row.session_id } : {}),
+      ...(row.source ? { source: row.source } : {}),
+      matchReasons: ['id'],
+    }));
+  }
+
+  private buildConversationSnippet(content: string, tokens: string[], loweredQuery: string): string {
+    const singleLine = content.replace(/\s+/g, ' ').trim();
+    if (!singleLine) return '';
+
+    const lowered = singleLine.toLowerCase();
+    const phraseIndex = loweredQuery ? lowered.indexOf(loweredQuery) : -1;
+    const tokenIndex = tokens
+      .map((token) => lowered.indexOf(token))
+      .filter((index) => index >= 0)
+      .sort((a, b) => a - b)[0] ?? -1;
+    const anchor = phraseIndex >= 0 ? phraseIndex : tokenIndex;
+
+    if (anchor < 0) {
+      return this.createSnippet(singleLine, 220) ?? singleLine.slice(0, 220);
+    }
+
+    const start = Math.max(0, anchor - 70);
+    const end = Math.min(singleLine.length, anchor + 150);
+    const window = singleLine.slice(start, end).trim();
+    return `${start > 0 ? '…' : ''}${window}${end < singleLine.length ? '…' : ''}`;
+  }
+
+  private extractQueryNgrams(tokens: string[], size: number): string[] {
+    const ngrams: string[] = [];
+    for (let index = 0; index <= tokens.length - size; index++) {
+      ngrams.push(tokens.slice(index, index + size).join(' '));
+    }
+    return ngrams;
+  }
+
   private parseTags(tagsJson: string): string[] {
     try {
       const parsed = JSON.parse(tagsJson);
@@ -1235,6 +1610,7 @@ export class MemoryManager extends EventEmitter {
   private readonly memorySnapshotLimit: number;
   private activeRun: Promise<void> | null = null;
   private rerunQueued = false;
+  private rerunForceQueued = false;
   private status: MemorySidekickStatus;
 
   constructor(options: MemoryManagerOptions = {}) {
@@ -1296,6 +1672,10 @@ export class MemoryManager extends EventEmitter {
     return this.queryMemoryFrom('api', args);
   }
 
+  deepSearchHistory(args: DeepSearchHistoryArgs): DeepSearchHistoryResult {
+    return this.deepSearchHistoryFrom('api', args);
+  }
+
   recordConversationMessage(input: ConversationMessageInput): ArchivedConversationMessage {
     const archived = this.store.appendConversationMessage(input);
     this.emitOperation('conversation', 'recorded', {
@@ -1312,14 +1692,14 @@ export class MemoryManager extends EventEmitter {
     return messages.map((message) => this.recordConversationMessage(message));
   }
 
-  maybeScheduleDistillation(): void {
+  maybeScheduleDistillation(options: { force?: boolean; reason?: string } = {}): void {
     if (!this.distiller) {
       this.updateStatus({ state: 'disabled' });
       return;
     }
 
     const pendingTokenEstimate = this.getPendingTokenEstimate();
-    if (pendingTokenEstimate < this.distillationThresholdTokens) {
+    if (!options.force && pendingTokenEstimate < this.distillationThresholdTokens) {
       if (!this.activeRun) {
         this.updateStatus({ state: 'idle', pendingTokenEstimate, rerunQueued: false });
       }
@@ -1328,6 +1708,7 @@ export class MemoryManager extends EventEmitter {
 
     if (this.activeRun) {
       this.rerunQueued = true;
+      this.rerunForceQueued = this.rerunForceQueued || Boolean(options.force);
       this.updateStatus({ state: 'pending', pendingTokenEstimate, rerunQueued: true });
       return;
     }
@@ -1336,13 +1717,20 @@ export class MemoryManager extends EventEmitter {
     this.emitOperation('distillation', 'scheduled', {
       pendingTokenEstimate,
       distillationThresholdTokens: this.distillationThresholdTokens,
+      forced: Boolean(options.force),
+      reason: options.reason ?? null,
     });
-    this.activeRun = this.runDistillationDeferred();
+    this.activeRun = this.runDistillationDeferred(Boolean(options.force));
     void this.activeRun.finally(() => {
       this.activeRun = null;
       if (this.rerunQueued) {
+        const force = this.rerunForceQueued;
         this.rerunQueued = false;
-        this.maybeScheduleDistillation();
+        this.rerunForceQueued = false;
+        this.maybeScheduleDistillation({
+          force,
+          ...(force ? { reason: 'queued-priority-rerun' } : {}),
+        });
       } else if (this.status.state !== 'error') {
         this.updateStatus({
           state: this.distiller ? 'idle' : 'disabled',
@@ -1359,6 +1747,10 @@ export class MemoryManager extends EventEmitter {
     }
   }
 
+  requestPriorityDistillation(reason = 'priority'): void {
+    this.maybeScheduleDistillation({ force: true, reason });
+  }
+
   getSidekickStatus(): MemorySidekickStatus {
     return {
       ...this.status,
@@ -1371,21 +1763,21 @@ export class MemoryManager extends EventEmitter {
     this.store.close();
   }
 
-  private async runDistillationDeferred(): Promise<void> {
+  private async runDistillationDeferred(force = false): Promise<void> {
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 0);
     });
-    await this.runDistillation();
+    await this.runDistillation(force);
   }
 
-  private async runDistillation(): Promise<void> {
+  private async runDistillation(force = false): Promise<void> {
     if (!this.distiller) return;
 
     const lastDistilledMessageId = Number(this.store.getRuntimeState(LAST_DISTILLED_MESSAGE_ID_KEY) ?? 0);
     const messages = this.store.getConversationMessagesSince(lastDistilledMessageId);
     const pendingTokenEstimate = messages.reduce((sum, message) => sum + message.tokenEstimate, 0);
 
-    if (messages.length === 0 || pendingTokenEstimate < this.distillationThresholdTokens) {
+    if (messages.length === 0 || (!force && pendingTokenEstimate < this.distillationThresholdTokens)) {
       this.updateStatus({ state: 'idle', pendingTokenEstimate, rerunQueued: this.rerunQueued });
       return;
     }
@@ -1405,6 +1797,7 @@ export class MemoryManager extends EventEmitter {
       pendingTokenEstimate,
       memorySnapshotCount: memorySnapshot.length,
       messageIds: messages.map((message) => message.id),
+      forced: force,
     });
 
     try {
@@ -1506,6 +1899,26 @@ export class MemoryManager extends EventEmitter {
           subject: memory.subject,
           status: memory.status,
           matchReasons: memory.matchReasons,
+        })),
+      }),
+    });
+    return result;
+  }
+
+  private deepSearchHistoryFrom(source: 'api', args: DeepSearchHistoryArgs): DeepSearchHistoryResult {
+    const result = this.store.deepSearchHistory(args);
+    this.emitOperation('memory', 'history_searched', {
+      source,
+      args: this.toLogValue(args),
+      result: this.toLogValue({
+        mode: result.mode,
+        count: result.count,
+        summary: result.summary,
+        messages: result.messages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          createdAt: message.createdAt,
+          matchReasons: message.matchReasons,
         })),
       }),
     });

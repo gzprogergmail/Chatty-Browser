@@ -245,6 +245,51 @@ await test('MemoryStore can aggregate up to five alternate search phrasings in o
   });
 });
 
+await test('MemoryStore can deep-search archived conversation history for undistilled findings', async () => {
+  await withTempStore('deep-history-search', async (_dir, dbPath) => {
+    const store = new MemoryStore(dbPath);
+
+    try {
+      store.appendConversationMessage({
+        role: 'user',
+        content: 'Can you check the Tyee Middle School calendar?',
+        source: 'user-command',
+      });
+      store.appendConversationMessage({
+        role: 'assistant',
+        content: [
+          'I checked BSD 405 and Tyee Middle School follows the district no-school dates unless the school posts a special exception.',
+          'Upcoming non-school days include 2026-03-27 and Spring Break from 2026-04-06 through 2026-04-10.',
+          'Source: https://www.bsd405.org/about-us/calendar/important-dates-details/~board/calendars/post/important-dates-for-families',
+        ].join('\n'),
+        source: 'assistant-response',
+      });
+
+      const results = store.deepSearchHistory({
+        queries: ['Tyee Middle School holidays', 'bsd 405 tyee calendar'],
+        limit: 5,
+      });
+
+      assert.equal(results.mode, 'history-search');
+      assert.ok(results.count >= 1);
+      assert.match(results.summary, /archived conversation hit/);
+      assert.equal(results.messages[0].role, 'assistant');
+      assert.match(results.messages[0].contentSnippet, /Tyee Middle School follows the district no-school dates/i);
+
+      const readBack = store.deepSearchHistory({
+        messageIds: [results.messages[0].id],
+        includeFullContent: true,
+      });
+
+      assert.equal(readBack.mode, 'history-read');
+      assert.equal(readBack.count, 1);
+      assert.match(readBack.messages[0].content, /Spring Break from 2026-04-06 through 2026-04-10/);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 await test('MemoryManager runs the sidekick distiller asynchronously and persists corrections', async () => {
   await withTempStore('sidekick-distillation', async (_dir, dbPath) => {
     let distillerCalls = 0;
@@ -301,6 +346,54 @@ await test('MemoryManager runs the sidekick distiller asynchronously and persist
 
       const old = manager.queryMemory({ memoryIds: [oldMemory.memoryId], includeFullDetails: true }).memories[0];
       assert.equal(old.status, 'superseded');
+    } finally {
+      manager.close();
+    }
+  });
+});
+
+await test('MemoryManager can prioritize distillation for substantial answers below the normal threshold', async () => {
+  await withTempStore('priority-distillation', async (_dir, dbPath) => {
+    let distillerCalls = 0;
+    const manager = new MemoryManager({
+      dbPath,
+      distillationThresholdTokens: 500,
+      async distiller(request) {
+        distillerCalls++;
+        assert.equal(request.messages.length, 2);
+        return {
+          summary: 'Saved one school calendar finding.',
+          memories: [
+            {
+              scope: 'general',
+              subject: 'Tyee Middle School calendar',
+              summary: 'Tyee Middle School follows BSD 405 no-school dates unless the school posts an exception.',
+              details: 'Key retrieval anchors: Tyee Middle School, BSD 405, Bellevue School District, holidays, non-school days.',
+              tags: ['tyee', 'bsd405', 'calendar', 'holidays'],
+            },
+          ],
+        };
+      },
+    });
+
+    try {
+      manager.recordConversationTurn([
+        { role: 'user', content: 'What are the Tyee Middle School holidays?', tokenEstimate: 10, source: 'user-command' },
+        {
+          role: 'assistant',
+          content: 'Tyee Middle School follows BSD 405 no-school dates unless the school posts an exception. Upcoming district closures include 2026-03-27 and Spring Break from 2026-04-06 through 2026-04-10.',
+          tokenEstimate: 40,
+          source: 'assistant-response',
+        },
+      ]);
+
+      manager.requestPriorityDistillation('substantial-assistant-finding');
+      await manager.flushSidekick();
+
+      assert.equal(distillerCalls, 1);
+      const saved = manager.queryMemory({ query: 'Tyee Middle School holidays', includeFullDetails: true, limit: 5 });
+      assert.equal(saved.count, 1);
+      assert.equal(saved.memories[0].subject, 'Tyee Middle School calendar');
     } finally {
       manager.close();
     }

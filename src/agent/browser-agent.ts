@@ -47,6 +47,7 @@ export class BrowserAgent {
 You have access to various browser automation tools through the MCP (Model Context Protocol) server.
 You also have long-term memory tools:
 - query_memory: Search reusable knowledge from past sessions using short results that support follow-up searches or direct lookup by memory ID.
+- deep_search_history: Search archived conversation history directly when normal memory search is not enough. It is slower and noisier, but it can recover older findings that never became durable memory.
 - save_memory: Save concise reusable lessons, workflows, preferences, or site knowledge for future sessions.
 
 When the user asks you to do something with the browser, break it down into steps and use the available tools.
@@ -58,9 +59,14 @@ Only ask the user for clarification when the ambiguity creates a meaningful risk
 Before re-learning how a site, workflow, or user preference works, use query_memory to check whether a prior session already discovered something reusable.
 query_memory results are intentionally compact. If the first search is only partially helpful, do a follow-up search with refined terms based on the short hits, or read specific memory IDs in full.
 query_memory also supports a queries array with up to 5 alternate phrasings, abbreviations, or likely synonyms in one call. Use that when memory lookup is ambiguous or the first wording may miss useful memory.
-If a memory search comes back empty, try a few alternate phrasings before giving up.
+When searching memory, vary your wording creatively instead of repeating the same terms. Try alternate phrasings, abbreviations, product names, school or district acronyms, workflow synonyms, and shorter subject-focused versions of the request.
+For example, if one search is weak, try nearby variants such as full name vs acronym, action phrase vs subject phrase, or corrected spelling.
+If a memory search comes back empty, try several alternate phrasings before giving up.
+If the user explicitly asks you to search deeper, search further, or search the whole history, explain that you can run a slower deep history search over archived conversation messages and ask whether they want that broader search.
+Use deep_search_history only after setting that expectation or when the user clearly asked for the broader, slower search.
 Use save_memory after discovering something likely to help future sessions, but save distilled reusable knowledge instead of raw transcripts or one-off details.
 If a new discovery overturns an older memory, save the corrected memory and mark the older memory IDs as superseded or invalidated.
+The app may prepend a "Current date and time" section before the live user request. Treat it as the authoritative turn date instead of guessing what "today" means.
 The app may prepend a "Relevant memory context" section before the live user request. Treat it as retrieved long-term memory: use it when helpful, but still verify anything time-sensitive or page-state-specific against the current browser state.
 Available actions typically include:
 - playwright_navigate(url): Navigate to a URL
@@ -132,6 +138,11 @@ If something goes wrong, explain the error and suggest alternatives.`;
         content: response,
         source: 'assistant-response',
       });
+
+      if (this.shouldPrioritizeDistillation(userCommand, response)) {
+        this.memory.requestPriorityDistillation('substantial-assistant-finding');
+        return response;
+      }
     }
 
     this.memory.maybeScheduleDistillation();
@@ -196,6 +207,8 @@ If something goes wrong, explain the error and suggest alternatives.`;
   }
 
   private buildPromptWithMemoryContext(userCommand: string): string {
+    const currentDateTime = this.buildCurrentDateTimeContext();
+
     try {
       const lookup = this.findRelevantMemoriesForPrompt(userCommand);
 
@@ -212,7 +225,13 @@ If something goes wrong, explain the error and suggest alternatives.`;
             injectedCount: 0,
           },
         });
-        return userCommand;
+        return [
+          'Current date and time:',
+          currentDateTime,
+          '',
+          'Live user request:',
+          userCommand,
+        ].join('\n');
       }
 
       const context = lookup.memories
@@ -240,6 +259,9 @@ If something goes wrong, explain the error and suggest alternatives.`;
       });
 
       return [
+        'Current date and time:',
+        currentDateTime,
+        '',
         'Relevant memory context:',
         context,
         '',
@@ -255,8 +277,66 @@ If something goes wrong, explain the error and suggest alternatives.`;
           error: error instanceof Error ? error.message : String(error),
         },
       });
-      return userCommand;
+      return [
+        'Current date and time:',
+        currentDateTime,
+        '',
+        'Live user request:',
+        userCommand,
+      ].join('\n');
     }
+  }
+
+  private buildCurrentDateTimeContext(now = new Date()): string {
+    const parts = new Map(
+      new Intl.DateTimeFormat('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZoneName: 'short',
+      })
+        .formatToParts(now)
+        .filter((part) => part.type !== 'literal')
+        .map((part) => [part.type, part.value]),
+    );
+
+    const weekday = parts.get('weekday') ?? '';
+    const month = parts.get('month') ?? '';
+    const day = parts.get('day') ?? '';
+    const year = parts.get('year') ?? '';
+    const hour = parts.get('hour') ?? '';
+    const minute = parts.get('minute') ?? '';
+    const second = parts.get('second') ?? '';
+    const dayPeriod = parts.get('dayPeriod') ?? '';
+    const timeZoneName = parts.get('timeZoneName') ?? '';
+
+    return `${weekday}, ${month} ${day}, ${year} ${hour}:${minute}:${second} ${dayPeriod} ${timeZoneName} (${now.toISOString()})`.trim();
+  }
+
+  private shouldPrioritizeDistillation(userCommand: string, response: string): boolean {
+    const normalizedResponse = response.trim();
+    if (!normalizedResponse) {
+      return false;
+    }
+
+    const hasSourceSignals = /https?:\/\/|sources?\b|official\b/i.test(normalizedResponse);
+    const hasDateSignals = /\b\d{4}-\d{2}-\d{2}\b/.test(normalizedResponse) || /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b/i.test(normalizedResponse);
+    const hasListSignals = (normalizedResponse.match(/^\s*[-*]\s+/gm) ?? []).length >= 2;
+    const hasNamedEntityDensity = (normalizedResponse.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b/g) ?? []).length >= 2;
+    const responseLooksSubstantial = normalizedResponse.length >= 280 || normalizedResponse.split('\n').length >= 6;
+    const userAskedForResearch = /\b(find|look up|research|calendar|holiday|holidays|when|which|what|dates?|compare|difference|differences)\b/i.test(userCommand);
+
+    return responseLooksSubstantial && (
+      hasSourceSignals
+      || hasDateSignals
+      || hasListSignals
+      || hasNamedEntityDensity
+      || userAskedForResearch
+    );
   }
 
   private findRelevantMemoriesForPrompt(userCommand: string): PreflightMemoryLookup | null {

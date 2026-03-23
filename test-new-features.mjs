@@ -310,6 +310,10 @@ await test('BrowserAgent system prompt prefers autonomous research and default b
   assert.match(prompt, /mark the older memory IDs as superseded or invalidated/);
   assert.match(prompt, /Relevant memory context/);
   assert.match(prompt, /queries array with up to 5 alternate phrasings/);
+  assert.match(prompt, /vary your wording creatively instead of repeating the same terms/);
+  assert.match(prompt, /full name vs acronym/);
+  assert.match(prompt, /deep_search_history/);
+  assert.match(prompt, /search deeper, search further, or search the whole history/);
 });
 
 await test('CLI help text lists the memory and usage commands', async () => {
@@ -538,6 +542,117 @@ await test('CLI prints lightweight live feedback for background memory work', as
   assert.match(output, /Memory sidekick queued in background \(2,100 pending tokens\)\./);
   assert.match(output, /Memory sidekick saving in background\.\.\./);
   assert.match(output, /Memory sidekick finished: Saved one durable memory\./);
+});
+
+await test('CLI defers memory sidekick feedback while the user prompt is active', async () => {
+  let statusListener = null;
+  let resolvePrompt;
+  const agent = {
+    onMemorySidekickStatusChange(listener) {
+      statusListener = listener;
+      return () => {
+        statusListener = null;
+      };
+    },
+    async executeCommand(command) {
+      assert.equal(command, 'remember this');
+      return 'done';
+    },
+    didStreamLastTurn() {
+      return false;
+    },
+    getTokenUsage() {
+      return { model: 'gpt-5-mini', used: 120, max: 1000, compacting: false };
+    },
+    getMemorySidekickStatus() {
+      return {
+        state: 'idle',
+        pendingTokenEstimate: 0,
+        distillationThresholdTokens: 2000,
+        lastSavedCount: 0,
+        rerunQueued: false,
+      };
+    },
+  };
+  const cli = new CLIInterface(agent);
+
+  const logs = [];
+  const errors = [];
+  const writes = [];
+  const originalPrompt = inquirer.prompt;
+  const originalLog = console.log;
+  const originalError = console.error;
+  const originalClear = console.clear;
+  const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+  let promptCalls = 0;
+
+  console.log = (...args) => logs.push(stripAnsi(args.join(' ')));
+  console.error = (...args) => errors.push(stripAnsi(args.join(' ')));
+  console.clear = () => {};
+  process.stdout.write = (chunk, encoding, callback) => {
+    const value = typeof chunk === 'string' ? chunk : chunk.toString(typeof encoding === 'string' ? encoding : undefined);
+    writes.push(stripAnsi(value));
+
+    if (typeof encoding === 'function') {
+      encoding();
+    } else if (typeof callback === 'function') {
+      callback();
+    }
+
+    return true;
+  };
+
+  inquirer.prompt = async () => {
+    promptCalls++;
+    if (promptCalls === 1) {
+      return await new Promise((resolve) => {
+        resolvePrompt = resolve;
+      });
+    }
+
+    throw { isTtyError: true };
+  };
+
+  try {
+    const startPromise = cli.start();
+    for (let attempt = 0; attempt < 20 && typeof resolvePrompt !== 'function'; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(typeof resolvePrompt, 'function');
+
+    statusListener?.({
+      state: 'pending',
+      pendingTokenEstimate: 2100,
+      distillationThresholdTokens: 2000,
+      lastSavedCount: 0,
+      rerunQueued: false,
+    });
+    statusListener?.({
+      state: 'running',
+      pendingTokenEstimate: 2100,
+      distillationThresholdTokens: 2000,
+      lastSavedCount: 0,
+      rerunQueued: false,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const beforePromptResolves = [...logs, ...writes, ...errors].join('\n');
+    assert.doesNotMatch(beforePromptResolves, /Memory sidekick queued in background/);
+    assert.doesNotMatch(beforePromptResolves, /Memory sidekick saving in background/);
+
+    resolvePrompt({ command: 'remember this' });
+    await startPromise;
+
+    const output = [...logs, ...writes, ...errors].join('\n');
+    assert.match(output, /Memory sidekick queued in background \(2,100 pending tokens\)\./);
+    assert.match(output, /Memory sidekick saving in background\.\.\./);
+  } finally {
+    inquirer.prompt = originalPrompt;
+    console.log = originalLog;
+    console.error = originalError;
+    console.clear = originalClear;
+    process.stdout.write = originalStdoutWrite;
+  }
 });
 
 await test('CLI /memory-status prints the current sidekick status', async () => {

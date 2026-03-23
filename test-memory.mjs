@@ -45,6 +45,28 @@ async function withTempManager(label, fn) {
   }
 }
 
+async function withMockedDate(isoString, fn) {
+  const OriginalDate = globalThis.Date;
+  const fixedTime = new OriginalDate(isoString).getTime();
+
+  class MockDate extends OriginalDate {
+    constructor(value) {
+      super(value === undefined ? fixedTime : value);
+    }
+
+    static now() {
+      return fixedTime;
+    }
+  }
+
+  globalThis.Date = MockDate;
+  try {
+    return await fn();
+  } finally {
+    globalThis.Date = OriginalDate;
+  }
+}
+
 console.log('\n── App Memory Integration Tests ───────────────────────────────────────\n');
 
 await test('BrowserAgent.initialize registers package memory tools alongside browser tools', async () => {
@@ -77,7 +99,9 @@ await test('BrowserAgent.initialize registers package memory tools alongside bro
     assert.ok(toolNames.includes('browser_navigate'));
     assert.ok(toolNames.includes('save_memory'));
     assert.ok(toolNames.includes('query_memory'));
+    assert.ok(toolNames.includes('deep_search_history'));
     assert.match(captured.systemPrompt, /mark the older memory IDs as superseded or invalidated/);
+    assert.match(captured.systemPrompt, /Current date and time/);
 
     const memoryResult = await captured.callTool('query_memory', { query: 'canva', limit: 3 });
     assert.equal(memoryResult.mode, 'search');
@@ -112,9 +136,18 @@ await test('BrowserAgent routes browser tools to MCP and memory tools to the pac
       subject: 'canva',
       summary: 'Uploads are in the left sidebar.',
     });
+    memoryManager.recordConversationTurn([
+      { role: 'assistant', content: 'Tyee Middle School follows BSD 405 calendar dates.', source: 'assistant-response' },
+    ]);
+    const historyResult = await captured.callTool('deep_search_history', {
+      query: 'Tyee Middle School calendar',
+      limit: 3,
+    });
     const browserResult = await captured.callTool('browser_navigate', { url: 'https://example.com' });
 
     assert.equal(memoryResult.subject, 'canva');
+    assert.equal(historyResult.mode, 'history-search');
+    assert.equal(historyResult.count, 1);
     assert.deepStrictEqual(browserResult, {
       from: 'mcp',
       name: 'browser_navigate',
@@ -158,9 +191,47 @@ await test('BrowserAgent prepends relevant memory context before sending the pro
 
     assert.equal(response, 'Found it.');
     assert.equal(captured.prompts.length, 1);
+    assert.match(captured.prompts[0], /Current date and time:/);
     assert.match(captured.prompts[0], /Relevant memory context:/);
     assert.match(captured.prompts[0], /Canva uploads are in the left sidebar Uploads panel\./);
     assert.match(captured.prompts[0], /Live user request:\nOpen Canva uploads/);
+  });
+});
+
+await test('BrowserAgent refreshes the current date context on each turn', async () => {
+  await withTempManager('browser-agent-date-refresh', async (memoryManager) => {
+    const captured = { prompts: [] };
+    const copilot = {
+      async sendMessage(prompt) {
+        captured.prompts.push(prompt);
+        return 'Timestamp recorded.';
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+
+    await withMockedDate('2026-03-23T18:48:34.000Z', async () => {
+      await agent.executeCommand('first turn');
+    });
+    await withMockedDate('2026-03-24T09:15:01.000Z', async () => {
+      await agent.executeCommand('second turn');
+    });
+
+    assert.equal(captured.prompts.length, 2);
+    assert.match(captured.prompts[0], /Current date and time:\n.*2026-03-23T18:48:34\.000Z/);
+    assert.match(captured.prompts[1], /Current date and time:\n.*2026-03-24T09:15:01\.000Z/);
+    assert.match(captured.prompts[1], /Live user request:\nsecond turn/);
   });
 });
 
@@ -326,7 +397,10 @@ await test('BrowserAgent sends the raw prompt when no relevant memory is found',
     const response = await agent.executeCommand('Search for quarterly earnings');
 
     assert.equal(response, 'No memory hit.');
-    assert.deepStrictEqual(captured.prompts, ['Search for quarterly earnings']);
+    assert.equal(captured.prompts.length, 1);
+    assert.match(captured.prompts[0], /Current date and time:/);
+    assert.doesNotMatch(captured.prompts[0], /Relevant memory context:/);
+    assert.match(captured.prompts[0], /Live user request:\nSearch for quarterly earnings/);
   });
 });
 
@@ -358,7 +432,8 @@ await test('BrowserAgent records turns and exposes sidekick status from the pack
   try {
     const copilot = {
       async sendMessage(command) {
-        assert.equal(command, 'remember this');
+        assert.match(command, /Current date and time:/);
+        assert.match(command, /Live user request:\nremember this/);
         return 'I will keep that in mind.';
       },
       didStreamLastTurn() {
@@ -388,6 +463,67 @@ await test('BrowserAgent records turns and exposes sidekick status from the pack
     const memories = memoryManager.queryMemory({ query: 'concise answers', includeFullDetails: true, limit: 5 });
     assert.equal(memories.count, 1);
     assert.equal(memories.memories[0].subject, 'user preference');
+  } finally {
+    memoryManager.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test('BrowserAgent prioritizes distillation for substantial sourced answers even below the normal threshold', async () => {
+  const dir = path.join(process.cwd(), 'test-artifacts', 'browser-agent-priority-distillation');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const dbPath = path.join(dir, 'memory.sqlite');
+
+  let distillerCalls = 0;
+  const memoryManager = new MemoryManager({
+    dbPath,
+    distillationThresholdTokens: 500,
+    async distiller() {
+      distillerCalls++;
+      return {
+        summary: 'Saved one school calendar note.',
+        memories: [{
+          scope: 'general',
+          subject: 'Tyee Middle School calendar',
+          summary: 'Tyee Middle School follows BSD 405 no-school dates unless the school posts an exception.',
+          tags: ['tyee', 'bsd405', 'calendar', 'holidays'],
+        }],
+      };
+    },
+  });
+
+  try {
+    const copilot = {
+      async sendMessage() {
+        return [
+          'I checked BSD 405 and Tyee Middle School follows the district no-school dates unless the school posts a special exception.',
+          '- 2026-03-27 — Non-School Day',
+          '- 2026-04-06 through 2026-04-10 — Spring Break',
+          'Sources: https://www.bsd405.org/about-us/calendar/important-dates-details/~board/calendars/post/important-dates-for-families',
+        ].join('\n');
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+
+    await agent.executeCommand('What are the Tyee Middle School holidays?');
+    await agent.flushMemorySidekick();
+
+    assert.equal(distillerCalls, 1);
+    const saved = memoryManager.queryMemory({ query: 'Tyee Middle School holidays', includeFullDetails: true, limit: 5 });
+    assert.equal(saved.count, 1);
+    assert.equal(saved.memories[0].subject, 'Tyee Middle School calendar');
   } finally {
     memoryManager.close();
     fs.rmSync(dir, { recursive: true, force: true });
