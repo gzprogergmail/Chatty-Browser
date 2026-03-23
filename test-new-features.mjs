@@ -207,6 +207,44 @@ await test('CopilotClient streams reasoning and response chunks during a turn', 
   assert.match(output, /Final answer\./);
 });
 
+await test('CopilotClient still shows visible thinking and final response when delta events are missing', async () => {
+  const client = new CopilotClient();
+  const handlers = new Map();
+
+  const emit = (eventType, data) => {
+    for (const handler of handlers.get(eventType) ?? []) {
+      handler({ type: eventType, data });
+    }
+  };
+
+  client.session = {
+    on(eventType, handler) {
+      if (!handlers.has(eventType)) {
+        handlers.set(eventType, new Set());
+      }
+      handlers.get(eventType).add(handler);
+      return () => handlers.get(eventType).delete(handler);
+    },
+    async sendAndWait({ prompt }, timeoutMs) {
+      assert.equal(prompt, 'fallback please');
+      assert.equal(timeoutMs, 300_000);
+      emit('assistant.turn_start', { turnId: 'turn-1' });
+      emit('assistant.message', { content: 'Final answer without delta.', toolRequests: [{ id: 'tool-1' }] });
+      return { data: { content: 'Final answer without delta.' } };
+    },
+  };
+
+  const { output } = await captureConsole(async () => {
+    const response = await client.sendMessage('fallback please');
+    assert.equal(response, 'Final answer without delta.');
+  });
+
+  assert.equal(client.didStreamLastTurn(), true);
+  assert.match(output, /Thinking:/);
+  assert.match(output, /Response:/);
+  assert.match(output, /Final answer without delta\./);
+});
+
 await test('CopilotClient premium usage prefers the premium_interactions quota', async () => {
   const client = new CopilotClient();
   client.sdkClient = {

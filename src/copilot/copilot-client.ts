@@ -368,6 +368,9 @@ export class CopilotClient {
     this.lastTurnStreamed = false;
 
     const unsubscribers = [
+      this.session.on('assistant.turn_start', () => {
+        this.ensureLiveTurnSection('reasoning', streamState);
+      }),
       this.session.on('assistant.reasoning_delta', (event) => {
         if (!event.data.deltaContent) return;
         streamState.sawReasoningDelta = true;
@@ -383,7 +386,7 @@ export class CopilotClient {
         this.writeLiveTurnChunk('reasoning', event.data.content, streamState);
       }),
       this.session.on('assistant.message', (event) => {
-        if (streamState.sawMessageDelta || event.data.toolRequests?.length || !event.data.content?.trim()) return;
+        if (streamState.sawMessageDelta || !event.data.content?.trim()) return;
         this.writeLiveTurnChunk('message', event.data.content, streamState);
       }),
     ];
@@ -636,20 +639,25 @@ export class CopilotClient {
 
   private writeLiveTurnChunk(section: 'reasoning' | 'message', text: string, state: LiveTurnStreamState): void {
     this.lastTurnStreamed = true;
-
-    if (state.activeSection !== section) {
-      this.flushLiveTurnStream(state);
-      const heading = section === 'reasoning'
-        ? chalk.cyan('\n   💭 Thinking:\n')
-        : chalk.green('\n   🤖 Response:\n');
-      process.stdout.write(heading);
-      state.activeSection = section;
-      state.endedWithNewline = true;
-    }
+    this.ensureLiveTurnSection(section, state);
 
     process.stdout.write(section === 'reasoning' ? chalk.gray(text) : chalk.green(text));
     state.wroteContent = true;
     state.endedWithNewline = text.endsWith('\n');
+  }
+
+  private ensureLiveTurnSection(section: 'reasoning' | 'message', state: LiveTurnStreamState): void {
+    if (state.activeSection === section) {
+      return;
+    }
+
+    this.flushLiveTurnStream(state);
+    const heading = section === 'reasoning'
+      ? chalk.cyan('\n   💭 Thinking:\n')
+      : chalk.green('\n   🤖 Response:\n');
+    process.stdout.write(heading);
+    state.activeSection = section;
+    state.endedWithNewline = true;
   }
 
   private flushLiveTurnStream(state: LiveTurnStreamState | null = this.liveTurnStreamState): void {
