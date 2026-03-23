@@ -116,6 +116,15 @@ await test('CopilotClient context usage line prints the model name', async () =>
   assert.match(line, /Context \[gpt-4\.1 \(medium\)\]: ~512 \/ 2,048 tokens \(25\.0%, 4 msgs\)/);
 });
 
+await test('CopilotClient turn timeout can be updated and validated', async () => {
+  const client = new CopilotClient();
+
+  assert.equal(client.getTurnTimeoutMs(), 300_000);
+  assert.equal(client.setTurnTimeoutMs(90_000), 90_000);
+  assert.equal(client.getTurnTimeoutMs(), 90_000);
+  assert.throws(() => client.setTurnTimeoutMs(999), /at least 1000 ms/);
+});
+
 await test('CopilotClient premium usage prefers the premium_interactions quota', async () => {
   const client = new CopilotClient();
   client.sdkClient = {
@@ -225,6 +234,73 @@ await test('CLI help text lists the new /usage command', async () => {
   });
 
   assert.match(output, /\/usage - Show remaining Copilot premium requests allowance/);
+  assert.match(output, /\/timeout - Show the current per-turn timeout/);
+});
+
+await test('CLI /timeout shows the current turn timeout', async () => {
+  const agent = {
+    getTurnTimeoutMs() {
+      return 300_000;
+    },
+  };
+  const cli = new CLIInterface(agent);
+
+  const { output } = await withPromptMock(
+    [
+      () => ({ command: '/timeout' }),
+      { isTtyError: true },
+    ],
+    () => captureConsole(async () => {
+      await cli.start();
+    }),
+  );
+
+  assert.match(output, /Turn timeout is 5m \(300,000 ms\)/);
+});
+
+await test('CLI /timeout updates the turn timeout on the fly', async () => {
+  let updatedValue = 0;
+  const agent = {
+    setTurnTimeoutMs(timeoutMs) {
+      updatedValue = timeoutMs;
+      return timeoutMs;
+    },
+  };
+  const cli = new CLIInterface(agent);
+
+  const { output } = await withPromptMock(
+    [
+      () => ({ command: '/timeout 90s' }),
+      { isTtyError: true },
+    ],
+    () => captureConsole(async () => {
+      await cli.start();
+    }),
+  );
+
+  assert.equal(updatedValue, 90_000);
+  assert.match(output, /Turn timeout set to 90s \(90,000 ms\)/);
+});
+
+await test('CLI /timeout rejects invalid timeout values', async () => {
+  const agent = {
+    setTurnTimeoutMs() {
+      throw new Error('should not be called');
+    },
+  };
+  const cli = new CLIInterface(agent);
+
+  const { output } = await withPromptMock(
+    [
+      () => ({ command: '/timeout nope' }),
+      { isTtyError: true },
+    ],
+    () => captureConsole(async () => {
+      await cli.start();
+    }),
+  );
+
+  assert.match(output, /Invalid timeout\. Use values like \/timeout 30000, \/timeout 30s, or \/timeout 5m\./);
 });
 
 await test('CLI prints model name alongside token usage after a normal turn', async () => {

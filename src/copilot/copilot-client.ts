@@ -148,6 +148,7 @@ export class CopilotClient {
   private model: string = 'gpt-4.1';
   private reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | undefined = undefined;
   private telemetryFilePath: string | null = null;
+  private turnTimeoutMs = 300_000;
 
   // Saved for /new session re-creation
   private savedTools: MCPToolDef[] = [];
@@ -337,7 +338,7 @@ export class CopilotClient {
     });
   }
 
-  async sendMessage(message: string, timeoutMs = 300_000): Promise<string> {
+  async sendMessage(message: string, timeoutMs = this.turnTimeoutMs): Promise<string> {
     if (!this.session) {
       throw new Error('No active session. Call createSession() first.');
     }
@@ -348,6 +349,19 @@ export class CopilotClient {
     const content: string = response?.data?.content ?? '';
     process.stdout.write(chalk.gray('   ✅ Turn complete') + '\n');
     return content;
+  }
+
+  getTurnTimeoutMs(): number {
+    return this.turnTimeoutMs;
+  }
+
+  setTurnTimeoutMs(timeoutMs: number): number {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 1_000) {
+      throw new Error('Timeout must be at least 1000 ms.');
+    }
+
+    this.turnTimeoutMs = Math.round(timeoutMs);
+    return this.turnTimeoutMs;
   }
 
   /** Disconnect and recreate a fresh session (used by /new command). */

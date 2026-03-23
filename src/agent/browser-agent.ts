@@ -77,6 +77,14 @@ If something goes wrong, explain the error and suggest alternatives.`;
     return this.copilot.setModel(modelId);
   }
 
+  getTurnTimeoutMs(): number {
+    return this.copilot.getTurnTimeoutMs();
+  }
+
+  setTurnTimeoutMs(timeoutMs: number): number {
+    return this.copilot.setTurnTimeoutMs(timeoutMs);
+  }
+
   /** Approximate token usage for the current conversation. */
   getTokenUsage(): TokenUsageSnapshot {
     return this.copilot.getTokenUsage();

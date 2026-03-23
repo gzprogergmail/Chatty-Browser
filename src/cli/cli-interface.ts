@@ -63,6 +63,11 @@ export class CLIInterface {
           continue;
         }
 
+        if (trimmedCommand.toLowerCase().startsWith('/timeout')) {
+          this.handleTimeoutCommand(trimmedCommand);
+          continue;
+        }
+
         // Execute the command through the agent
         console.log(chalk.gray('\n🤖 Agent: Processing...\n'));
         
@@ -95,6 +100,8 @@ export class CLIInterface {
     console.log(chalk.gray('    - "Fill in the form with my email"'));
     console.log('\n  Special commands:');
     console.log('  • /model - Choose from the live Copilot model list');
+    console.log('  • /timeout - Show the current per-turn timeout');
+    console.log('  • /timeout 10m - Set the per-turn timeout using ms, s, or m');
     console.log('  • /usage - Show remaining Copilot premium requests allowance');
     console.log('  • /new  - Start a new session (clears conversation history)');
     console.log('  • help  - Show this help message');
@@ -131,6 +138,20 @@ export class CLIInterface {
     const colour = used / max > 0.85 ? chalk.red : used / max > 0.60 ? chalk.yellow : chalk.gray;
     const compactingTag = compacting ? chalk.cyan(' [⏳ compacting...]') : '';
     console.log(colour(`   Context [${model}]: ${bar} ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)`) + compactingTag + '\n');
+  }
+
+  private handleTimeoutCommand(command: string) {
+    const parts = command.split(/\s+/).filter(Boolean);
+
+    if (parts.length === 1) {
+      const current = this.agent.getTurnTimeoutMs();
+      console.log(chalk.cyan(`\n⏱️ Turn timeout is ${this.formatTimeout(current)} (${current.toLocaleString()} ms)\n`));
+      return;
+    }
+
+    const parsed = this.parseTimeout(parts.slice(1).join(' '));
+    const updated = this.agent.setTurnTimeoutMs(parsed);
+    console.log(chalk.cyan(`\n⏱️ Turn timeout set to ${this.formatTimeout(updated)} (${updated.toLocaleString()} ms)\n`));
   }
 
   private async showPremiumRequestsUsage() {
@@ -178,6 +199,37 @@ export class CLIInterface {
       hour12: true,
       timeZoneName: 'short',
     });
+  }
+
+  private parseTimeout(value: string): number {
+    const trimmed = value.trim().toLowerCase();
+    const match = trimmed.match(/^(\d+(?:\.\d+)?)(ms|s|m)?$/);
+    if (!match) {
+      throw new Error('Invalid timeout. Use values like /timeout 30000, /timeout 30s, or /timeout 5m.');
+    }
+
+    const amount = Number(match[1]);
+    const unit = match[2] ?? 's';
+    const multiplier = unit === 'ms' ? 1 : unit === 's' ? 1_000 : 60_000;
+    const timeoutMs = amount * multiplier;
+
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 1_000) {
+      throw new Error('Timeout must be at least 1 second.');
+    }
+
+    return Math.round(timeoutMs);
+  }
+
+  private formatTimeout(timeoutMs: number): string {
+    if (timeoutMs % 60_000 === 0) {
+      return `${timeoutMs / 60_000}m`;
+    }
+
+    if (timeoutMs % 1_000 === 0) {
+      return `${timeoutMs / 1_000}s`;
+    }
+
+    return `${timeoutMs}ms`;
   }
 
   private buildBar(used: number, max: number, width: number): string {
