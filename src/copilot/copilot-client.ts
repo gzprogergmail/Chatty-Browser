@@ -5,6 +5,8 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import type { MemoryDistillationRequest } from '../memory/memory-store.js';
+import type { MemoryDistillationResult } from '../memory/memory-store.js';
 import { llmPayloadLogger, toolLogger } from './tool-logger.js';
 
 const LOG_DIR = path.join(
@@ -502,6 +504,77 @@ export class CopilotClient {
     };
   }
 
+  async distillConversationMemory(request: MemoryDistillationRequest): Promise<MemoryDistillationResult> {
+    if (!this.sdkClient) {
+      throw new Error('Copilot SDK client is not initialized.');
+    }
+
+    const sidekickSession = await this.sdkClient.createSession({
+      model: this.model,
+      ...(this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : {}),
+      streaming: false,
+      onPermissionRequest: permissionHandler,
+      availableTools: [],
+      infiniteSessions: { enabled: false },
+      systemMessage: {
+        mode: 'replace',
+        content: [
+          'You are a background memory-distillation sidekick.',
+          'Your job is to read recent conversation snippets and return compact durable memories as JSON only.',
+          'Return exactly one JSON object with this shape:',
+          '{"summary":"string","memories":[{"scope":"site|workflow|user|project|task|general","subject":"string","summary":"string","details":"string","tags":["string"],"confidence":0.0,"supersedesMemoryIds":[1],"invalidatesMemoryIds":[2],"invalidationReason":"string"}]}',
+          'Rules:',
+          '- Save only reusable knowledge, workflows, preferences, corrections, or site behavior.',
+          '- If newer evidence overturns older memory, list the older memory IDs in supersedesMemoryIds or invalidatesMemoryIds.',
+          '- Prefer an empty memories array when nothing durable should be saved.',
+          '- Do not include markdown fences or commentary outside the JSON object.',
+        ].join('\n'),
+      },
+    });
+
+    try {
+      const prompt = [
+        `Pending token estimate: ${request.pendingTokenEstimate}`,
+        `Distillation threshold: ${request.distillationThresholdTokens}`,
+        '',
+        'Recent conversation delta:',
+        JSON.stringify(request.messages, null, 2),
+        '',
+        'Relevant active memories:',
+        JSON.stringify(request.memorySnapshot, null, 2),
+      ].join('\n');
+
+      const response = await sidekickSession.sendAndWait({ prompt }, Math.max(this.turnTimeoutMs, 120_000));
+      const rawContent = response?.data?.content ?? '';
+      const parsed = this.extractJsonObject(rawContent);
+      const memories = Array.isArray(parsed.memories) ? parsed.memories : [];
+
+      return {
+        summary: typeof parsed.summary === 'string' ? parsed.summary : undefined,
+        memories: memories
+          .filter((candidate): candidate is Record<string, unknown> => typeof candidate === 'object' && candidate !== null)
+          .map((candidate) => ({
+            scope: typeof candidate.scope === 'string' ? candidate.scope as any : undefined,
+            subject: typeof candidate.subject === 'string' ? candidate.subject : '',
+            summary: typeof candidate.summary === 'string' ? candidate.summary : '',
+            details: typeof candidate.details === 'string' ? candidate.details : undefined,
+            tags: Array.isArray(candidate.tags) ? candidate.tags.filter((tag): tag is string => typeof tag === 'string') : undefined,
+            confidence: typeof candidate.confidence === 'number' ? candidate.confidence : undefined,
+            supersedesMemoryIds: Array.isArray(candidate.supersedesMemoryIds)
+              ? candidate.supersedesMemoryIds.filter((id): id is number => Number.isInteger(id) && id > 0)
+              : undefined,
+            invalidatesMemoryIds: Array.isArray(candidate.invalidatesMemoryIds)
+              ? candidate.invalidatesMemoryIds.filter((id): id is number => Number.isInteger(id) && id > 0)
+              : undefined,
+            invalidationReason: typeof candidate.invalidationReason === 'string' ? candidate.invalidationReason : undefined,
+          }))
+          .filter((candidate) => candidate.subject.trim() && candidate.summary.trim()),
+      };
+    } finally {
+      await sidekickSession.disconnect().catch(() => {});
+    }
+  }
+
   private formatTokenUsageLine(label: string): string {
     const used = this.sdkCurrentTokens;
     const max = this.sdkTokenLimit || 1;
@@ -535,6 +608,24 @@ export class CopilotClient {
     if (!state || !state.wroteContent || state.endedWithNewline) return;
     process.stdout.write('\n');
     state.endedWithNewline = true;
+  }
+
+  private extractJsonObject(rawContent: string): Record<string, unknown> {
+    const trimmed = rawContent.trim();
+    const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const candidate = fencedMatch?.[1]?.trim() || trimmed;
+    const firstBrace = candidate.indexOf('{');
+    const lastBrace = candidate.lastIndexOf('}');
+    const jsonText = firstBrace >= 0 && lastBrace > firstBrace
+      ? candidate.slice(firstBrace, lastBrace + 1)
+      : candidate;
+    const parsed = JSON.parse(jsonText) as unknown;
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('Memory sidekick returned invalid JSON.');
+    }
+
+    return parsed as Record<string, unknown>;
   }
 
   private createTelemetryFilePath(): string {

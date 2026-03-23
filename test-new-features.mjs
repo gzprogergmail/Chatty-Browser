@@ -307,15 +307,17 @@ await test('BrowserAgent system prompt prefers autonomous research and default b
   assert.match(prompt, /Prefer doing web research in the browser to resolve missing details/);
   assert.match(prompt, /If the user asks to open something, default to opening it in the browser/);
   assert.match(prompt, /use the browser to research it, make the best-supported guess/);
+  assert.match(prompt, /mark the older memory IDs as superseded or invalidated/);
 });
 
-await test('CLI help text lists the new /usage command', async () => {
+await test('CLI help text lists the memory and usage commands', async () => {
   const cli = new CLIInterface({});
   const { output } = await captureConsole(async () => {
     cli.showHelp();
   });
 
   assert.match(output, /\/usage - Show remaining Copilot premium requests allowance/);
+  assert.match(output, /\/memory-status - Show the background memory sidekick status/);
   assert.match(output, /\/timeout - Show the current per-turn timeout/);
 });
 
@@ -399,6 +401,9 @@ await test('CLI prints model name alongside token usage after a normal turn', as
     didStreamLastTurn() {
       return false;
     },
+    getMemorySidekickStatus() {
+      return { state: 'idle', pendingTokenEstimate: 0, distillationThresholdTokens: 2000, lastSavedCount: 0, rerunQueued: false };
+    },
   };
   const cli = new CLIInterface(agent);
 
@@ -414,6 +419,7 @@ await test('CLI prints model name alongside token usage after a normal turn', as
 
   assert.equal(executed, 1);
   assert.match(output, /Context \[gpt-5\.4\]: \[[^\]]+\] ~300 \/ 1,200 tokens \(25\.0%\)/);
+  assert.match(output, /Memory sidekick: idle \(0 \/ 2,000 pending tokens\)/);
 });
 
 await test('CLI does not duplicate the final answer after a streamed turn', async () => {
@@ -429,6 +435,9 @@ await test('CLI does not duplicate the final answer after a streamed turn', asyn
     },
     getTokenUsage() {
       return { model: 'gpt-5-mini', used: 100, max: 1000, compacting: false };
+    },
+    getMemorySidekickStatus() {
+      return { state: 'running', pendingTokenEstimate: 2300, distillationThresholdTokens: 2000, lastSavedCount: 1, lastSummary: 'Saved one item.', rerunQueued: false };
     },
   };
   const cli = new CLIInterface(agent);
@@ -446,6 +455,35 @@ await test('CLI does not duplicate the final answer after a streamed turn', asyn
   assert.match(output, /Thinking:/);
   assert.match(output, /Response:/);
   assert.doesNotMatch(output, /🤖 Agent: Done\./);
+  assert.match(output, /Memory sidekick: running \(2,300 \/ 2,000 pending tokens, last: Saved one item\./);
+});
+
+await test('CLI /memory-status prints the current sidekick status', async () => {
+  const agent = {
+    getMemorySidekickStatus() {
+      return {
+        state: 'pending',
+        pendingTokenEstimate: 2100,
+        distillationThresholdTokens: 2000,
+        lastSavedCount: 2,
+        rerunQueued: true,
+        lastSummary: 'Saved 2 memories.',
+      };
+    },
+  };
+  const cli = new CLIInterface(agent);
+
+  const { output } = await withPromptMock(
+    [
+      () => ({ command: '/memory-status' }),
+      { isTtyError: true },
+    ],
+    () => captureConsole(async () => {
+      await cli.start();
+    }),
+  );
+
+  assert.match(output, /Memory sidekick: pending \(2,100 \/ 2,000 pending tokens, rerun queued, last: Saved 2 memories\./);
 });
 
 await test('CLI /usage command calls the agent and prints the remaining premium allowance', async () => {

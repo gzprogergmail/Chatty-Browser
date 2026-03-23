@@ -2,9 +2,16 @@ import { CopilotClient } from '../copilot/copilot-client.js';
 import type { AvailableModel } from '../copilot/copilot-client.js';
 import type { PremiumRequestsUsage } from '../copilot/copilot-client.js';
 import type { TokenUsageSnapshot } from '../copilot/copilot-client.js';
-import { MemoryStore } from '../memory/memory-store.js';
+import { MemoryManager } from '../memory/memory-store.js';
+import type { MemoryManagerOptions } from '../memory/memory-store.js';
+import type { MemorySidekickStatus } from '../memory/memory-store.js';
 import { MCPServerManager } from '../mcp/mcp-server-manager.js';
 import chalk from 'chalk';
+
+interface BrowserAgentOptions {
+  memoryManager?: MemoryManager;
+  memoryOptions?: Omit<MemoryManagerOptions, 'distiller'>;
+}
 
 export class BrowserAgent {
   private readonly systemPrompt = `You are a helpful AI assistant that controls a web browser using Playwright.
@@ -22,6 +29,7 @@ Only ask the user for clarification when the ambiguity creates a meaningful risk
 Before re-learning how a site, workflow, or user preference works, use query_memory to check whether a prior session already discovered something reusable.
 query_memory results are intentionally compact. If the first search is only partially helpful, do a follow-up search with refined terms based on the short hits, or read specific memory IDs in full.
 Use save_memory after discovering something likely to help future sessions, but save distilled reusable knowledge instead of raw transcripts or one-off details.
+If a new discovery overturns an older memory, save the corrected memory and mark the older memory IDs as superseded or invalidated.
 Available actions typically include:
 - playwright_navigate(url): Navigate to a URL
 - playwright_click(selector): Click an element
@@ -32,12 +40,20 @@ Available actions typically include:
 
 Always explain what you're doing and provide feedback to the user.
 If something goes wrong, explain the error and suggest alternatives.`;
-  private readonly memory = new MemoryStore();
+  private readonly memory: MemoryManager;
 
   constructor(
     private copilot: CopilotClient,
     private mcp: MCPServerManager,
-  ) {}
+    options: BrowserAgentOptions = {},
+  ) {
+    this.memory = options.memoryManager ?? new MemoryManager({
+      ...options.memoryOptions,
+      distiller: typeof this.copilot.distillConversationMemory === 'function'
+        ? (request) => this.copilot.distillConversationMemory(request)
+        : undefined,
+    });
+  }
 
   async initialize() {
     const browserTools = this.mcp.getTools();
@@ -58,10 +74,27 @@ If something goes wrong, explain the error and suggest alternatives.`;
   }
 
   async executeCommand(userCommand: string): Promise<string> {
+    this.memory.recordConversationMessage({
+      role: 'user',
+      content: userCommand,
+      source: 'user-command',
+    });
+
     // The official SDK drives the entire agentic loop (tool calls → results
     // → follow-up turns) automatically.  We just send the user's request and
     // receive the final narrative response.
-    return this.copilot.sendMessage(userCommand);
+    const response = await this.copilot.sendMessage(userCommand);
+
+    if (response.trim()) {
+      this.memory.recordConversationMessage({
+        role: 'assistant',
+        content: response,
+        source: 'assistant-response',
+      });
+    }
+
+    this.memory.maybeScheduleDistillation();
+    return response;
   }
 
   didStreamLastTurn(): boolean {
@@ -96,6 +129,14 @@ If something goes wrong, explain the error and suggest alternatives.`;
 
   async getPremiumRequestsUsage(): Promise<PremiumRequestsUsage> {
     return this.copilot.getPremiumRequestsUsage();
+  }
+
+  getMemorySidekickStatus(): MemorySidekickStatus {
+    return this.memory.getSidekickStatus();
+  }
+
+  async flushMemorySidekick(): Promise<void> {
+    await this.memory.flushSidekick();
   }
 
   private async callTool(name: string, args: unknown): Promise<unknown> {

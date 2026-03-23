@@ -63,6 +63,11 @@ export class CLIInterface {
           continue;
         }
 
+        if (trimmedCommand.toLowerCase() === '/memory-status') {
+          this.showMemorySidekickStatus();
+          continue;
+        }
+
         if (trimmedCommand.toLowerCase().startsWith('/timeout')) {
           this.handleTimeoutCommand(trimmedCommand);
           continue;
@@ -81,6 +86,7 @@ export class CLIInterface {
 
         // Show token usage after every response
         this.showTokenUsage();
+        this.showMemorySidekickStatus();
 
       } catch (error) {
         if ((error as any).isTtyError) {
@@ -107,6 +113,7 @@ export class CLIInterface {
     console.log('  • /timeout - Show the current per-turn timeout');
     console.log('  • /timeout 10m - Set the per-turn timeout using ms, s, or m');
     console.log('  • /usage - Show remaining Copilot premium requests allowance');
+    console.log('  • /memory-status - Show the background memory sidekick status');
     console.log('  • /new  - Start a new session (clears conversation history)');
     console.log('  • help  - Show this help message');
     console.log('  • clear - Clear the screen');
@@ -142,6 +149,18 @@ export class CLIInterface {
     const colour = used / max > 0.85 ? chalk.red : used / max > 0.60 ? chalk.yellow : chalk.gray;
     const compactingTag = compacting ? chalk.cyan(' [⏳ compacting...]') : '';
     console.log(colour(`   Context [${model}]: ${bar} ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)`) + compactingTag + '\n');
+  }
+
+  private showMemorySidekickStatus() {
+    const status = this.agent.getMemorySidekickStatus();
+    const summary = status.lastSummary ? `, last: ${status.lastSummary}` : '';
+    const errorText = status.lastError ? `, error: ${status.lastError}` : '';
+    const queuedText = status.rerunQueued ? ', rerun queued' : '';
+    console.log(
+      chalk.gray(
+        `   Memory sidekick: ${status.state} (${status.pendingTokenEstimate.toLocaleString()} / ${status.distillationThresholdTokens.toLocaleString()} pending tokens${queuedText}${summary}${errorText})`,
+      ) + '\n',
+    );
   }
 
   private handleTimeoutCommand(command: string) {

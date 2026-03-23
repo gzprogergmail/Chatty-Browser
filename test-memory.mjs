@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BrowserAgent } from './dist/agent/browser-agent.js';
-import { MemoryStore } from './dist/memory/memory-store.js';
+import { MemoryManager } from './dist/memory/memory-store.js';
 
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -29,154 +29,161 @@ async function test(label, fn) {
   }
 }
 
-async function withTempStore(label, fn) {
+async function withTempManager(label, fn) {
   const dir = path.join(process.cwd(), 'test-artifacts', label.replace(/[^a-z0-9-]+/gi, '-').toLowerCase());
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
-  const store = new MemoryStore(path.join(dir, 'memory.sqlite'));
+  const dbPath = path.join(dir, 'memory.sqlite');
+  const manager = new MemoryManager({ dbPath, distillationThresholdTokens: 1 });
 
   try {
-    return await fn(store, dir);
+    return await fn(manager, dir);
   } finally {
-    store.close();
+    manager.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
-console.log('\n── Memory Tests ───────────────────────────────────────────────────────\n');
+console.log('\n── App Memory Integration Tests ───────────────────────────────────────\n');
 
-await test('save_memory creates a reusable memory record', async () => {
-  await withTempStore('save-memory-create', async (store, dir) => {
-    const result = await store.callTool('save_memory', {
-      scope: 'site',
-      subject: 'canva',
-      summary: 'Canva editor usually needs a short wait after navigation.',
-      details: 'Wait for the left sidebar and editor canvas before clicking.',
-      tags: ['canva', 'editor', 'timing'],
-      confidence: 0.9,
-    });
+await test('BrowserAgent.initialize registers package memory tools alongside browser tools', async () => {
+  await withTempManager('browser-agent-init', async (memoryManager) => {
+    const captured = {};
+    const copilot = {
+      async createSession(tools, callTool, systemPrompt) {
+        captured.tools = tools;
+        captured.callTool = callTool;
+        captured.systemPrompt = systemPrompt;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [{
+          name: 'browser_navigate',
+          description: 'Navigate to a URL.',
+          inputSchema: { type: 'object', properties: { url: { type: 'string' } } },
+        }];
+      },
+      async callTool(name, args) {
+        return { from: 'mcp', name, args };
+      },
+    };
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
 
-    assert.equal(result.status, 'created');
-    assert.equal(result.subject, 'canva');
-    assert.ok(fs.existsSync(path.join(dir, 'memory.sqlite')));
+    await agent.initialize();
+
+    const toolNames = captured.tools.map((tool) => tool.name);
+    assert.ok(toolNames.includes('browser_navigate'));
+    assert.ok(toolNames.includes('save_memory'));
+    assert.ok(toolNames.includes('query_memory'));
+    assert.match(captured.systemPrompt, /mark the older memory IDs as superseded or invalidated/);
+
+    const memoryResult = await captured.callTool('query_memory', { query: 'canva', limit: 3 });
+    assert.equal(memoryResult.mode, 'search');
   });
 });
 
-await test('save_memory updates an existing record instead of duplicating it', async () => {
-  await withTempStore('save-memory-update', async (store) => {
-    const first = await store.callTool('save_memory', {
+await test('BrowserAgent routes browser tools to MCP and memory tools to the package manager', async () => {
+  await withTempManager('browser-agent-routing', async (memoryManager) => {
+    const captured = {};
+    const copilot = {
+      async createSession(_tools, callTool) {
+        captured.callTool = callTool;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [{
+          name: 'browser_navigate',
+          description: 'Navigate to a URL.',
+          inputSchema: { type: 'object', properties: { url: { type: 'string' } } },
+        }];
+      },
+      async callTool(name, args) {
+        return { from: 'mcp', name, args };
+      },
+    };
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+    await agent.initialize();
+
+    const memoryResult = await captured.callTool('save_memory', {
       scope: 'site',
       subject: 'canva',
-      summary: 'Canva uploads live in the left sidebar.',
-      details: 'Open Uploads from the left rail.',
-      tags: ['canva'],
-      confidence: 0.7,
+      summary: 'Uploads are in the left sidebar.',
     });
+    const browserResult = await captured.callTool('browser_navigate', { url: 'https://example.com' });
 
-    const second = await store.callTool('save_memory', {
-      scope: 'site',
-      subject: 'canva',
-      summary: 'Canva uploads live in the left sidebar.',
-      details: 'Open Uploads from the left rail, then drag files into the editor.',
-      tags: ['canva', 'uploads'],
-      confidence: 0.95,
+    assert.equal(memoryResult.subject, 'canva');
+    assert.deepStrictEqual(browserResult, {
+      from: 'mcp',
+      name: 'browser_navigate',
+      args: { url: 'https://example.com' },
     });
-
-    const query = await store.callTool('query_memory', { query: 'canva uploads', includeFullDetails: true, limit: 5 });
-    assert.equal(first.memoryId, second.memoryId);
-    assert.equal(second.status, 'updated');
-    assert.equal(query.count, 1);
-    assert.match(query.memories[0].details, /drag files into the editor/);
-    assert.deepStrictEqual(query.memories[0].tags, ['canva', 'uploads']);
   });
 });
 
-await test('query_memory combines structured filters and text search', async () => {
-  await withTempStore('query-memory-search', async (store) => {
-    await store.callTool('save_memory', {
-      scope: 'site',
-      subject: 'canva',
-      summary: 'Brand kit is in the left sidebar.',
-      details: 'Use the Brand panel in the editor sidebar.',
-      tags: ['canva', 'brand'],
-    });
-    await store.callTool('save_memory', {
-      scope: 'workflow',
-      subject: 'invoice export',
-      summary: 'Export invoices as PDF after previewing totals.',
-      details: 'Verify totals before exporting.',
-      tags: ['invoice', 'pdf'],
-    });
+await test('BrowserAgent records turns and exposes sidekick status from the package manager', async () => {
+  const dir = path.join(process.cwd(), 'test-artifacts', 'browser-agent-sidekick');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const dbPath = path.join(dir, 'memory.sqlite');
 
-    const result = await store.callTool('query_memory', {
-      query: 'brand sidebar',
-      scope: 'site',
-      subject: 'canva',
-      tags: ['brand'],
-      limit: 5,
-    });
-
-    assert.equal(result.mode, 'search');
-    assert.equal(result.count, 1);
-    assert.equal(result.memories[0].subject, 'canva');
-    assert.ok(result.memories[0].matchReasons.includes('fts') || result.memories[0].matchReasons.includes('text'));
-    assert.ok(typeof result.memories[0].detailsSnippet === 'string');
-  });
-});
-
-await test('query_memory can read full records by ID after a short search result', async () => {
-  await withTempStore('query-memory-read', async (store) => {
-    const saved = await store.callTool('save_memory', {
-      scope: 'site',
-      subject: 'github billing',
-      summary: 'Billing entity selection is under Copilot billing settings.',
-      details: 'Go to Settings > Copilot > Billing to choose the billing entity for premium requests.',
-      tags: ['github', 'billing', 'copilot'],
-    });
-
-    const result = await store.callTool('query_memory', {
-      memoryIds: [saved.memoryId],
-    });
-
-    assert.equal(result.mode, 'read');
-    assert.equal(result.count, 1);
-    assert.match(result.memories[0].details, /Settings > Copilot > Billing/);
-  });
-});
-
-await test('BrowserAgent.initialize registers memory tools alongside browser tools', async () => {
-  const captured = {};
-  const copilot = {
-    async createSession(tools, callTool, systemPrompt) {
-      captured.tools = tools;
-      captured.callTool = callTool;
-      captured.systemPrompt = systemPrompt;
+  let distillerCalls = 0;
+  const memoryManager = new MemoryManager({
+    dbPath,
+    distillationThresholdTokens: 1,
+    async distiller(request) {
+      distillerCalls++;
+      return {
+        summary: 'Saved one durable preference.',
+        memories: [{
+          scope: 'user',
+          subject: 'user preference',
+          summary: 'The user prefers concise answers.',
+          details: `Distilled from ${request.messages.length} messages.`,
+          tags: ['user', 'preference'],
+        }],
+      };
     },
-  };
-  const mcp = {
-    getTools() {
-      return [{
-        name: 'browser_navigate',
-        description: 'Navigate to a URL.',
-        inputSchema: { type: 'object', properties: { url: { type: 'string' } } },
-      }];
-    },
-    async callTool(name, args) {
-      return { from: 'mcp', name, args };
-    },
-  };
-  const agent = new BrowserAgent(copilot, mcp);
+  });
 
-  await agent.initialize();
+  try {
+    const copilot = {
+      async sendMessage(command) {
+        assert.equal(command, 'remember this');
+        return 'I will keep that in mind.';
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
 
-  const toolNames = captured.tools.map(tool => tool.name);
-  assert.ok(toolNames.includes('browser_navigate'));
-  assert.ok(toolNames.includes('save_memory'));
-  assert.ok(toolNames.includes('query_memory'));
-  assert.match(captured.systemPrompt, /long-term memory tools/);
+    const response = await agent.executeCommand('remember this');
+    await agent.flushMemorySidekick();
 
-  const memoryResult = await captured.callTool('query_memory', { query: 'canva', limit: 3 });
-  assert.equal(memoryResult.mode, 'search');
+    assert.equal(response, 'I will keep that in mind.');
+    assert.equal(distillerCalls, 1);
+
+    const status = agent.getMemorySidekickStatus();
+    assert.equal(status.state, 'idle');
+    assert.match(status.lastSummary, /Saved one durable preference/);
+
+    const memories = memoryManager.queryMemory({ query: 'concise answers', includeFullDetails: true, limit: 5 });
+    assert.equal(memories.count, 1);
+    assert.equal(memories.memories[0].subject, 'user preference');
+  } finally {
+    memoryManager.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 console.log(`\n${'─'.repeat(68)}`);
