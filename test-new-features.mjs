@@ -88,6 +88,11 @@ async function withPromptMock(sequence, fn) {
 
 console.log('\n── New Feature Regression Tests ───────────────────────────────────────\n');
 
+await test('CopilotClient defaults to gpt-5-mini', async () => {
+  const client = new CopilotClient();
+  assert.equal(client.model, 'gpt-5-mini');
+});
+
 await test('CopilotClient token usage snapshot includes active model and reasoning', async () => {
   const client = new CopilotClient();
   client.model = 'gpt-5.4';

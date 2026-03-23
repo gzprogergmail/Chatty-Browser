@@ -145,7 +145,7 @@ export interface PremiumRequestsUsage {
 export class CopilotClient {
   private sdkClient: SDKClient | null = null;
   private session: CopilotSession | null = null;
-  private model: string = 'gpt-4.1';
+  private model: string = 'gpt-5-mini';
   private reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | undefined = undefined;
   private telemetryFilePath: string | null = null;
   private turnTimeoutMs = 300_000;
@@ -162,7 +162,7 @@ export class CopilotClient {
   private sdkMessagesLength = 0;
 
   async initialize(
-    model: string = 'gpt-4.1',
+    model: string = 'gpt-5-mini',
     githubToken?: string,
     reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh',
   ) {

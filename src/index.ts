@@ -17,11 +17,11 @@ async function main() {
     const token = await auth.authenticate();
     console.log(chalk.green('✓ GitHub authentication successful\n'));
 
-    // Step 2: Initialize Copilot SDK with GPT-4.1
-    console.log(chalk.cyan('Step 2: Starting Copilot SDK (GPT-4.1)...'));
+    // Step 2: Initialize Copilot SDK with gpt-5-mini
+    console.log(chalk.cyan('Step 2: Starting Copilot SDK (gpt-5-mini)...'));
     const copilot = new CopilotClient();
-    await copilot.initialize('gpt-4.1', token);
-    console.log(chalk.green('✓ Copilot SDK ready with GPT-4.1\n'));
+    await copilot.initialize('gpt-5-mini', token);
+    console.log(chalk.green('✓ Copilot SDK ready with gpt-5-mini\n'));
 
     // Step 3: Start Playwright MCP Server
     console.log(chalk.cyan('Step 3: Starting Playwright MCP Server...'));

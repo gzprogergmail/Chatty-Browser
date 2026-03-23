@@ -21,7 +21,7 @@ async function testCommand() {
     // Step 2: Initialize Copilot
     console.log(chalk.cyan('Connecting to Copilot...'));
     const copilot = new CopilotClient();
-    await copilot.initialize('gpt-4.1', token);
+    await copilot.initialize('gpt-5-mini', token);
     console.log(chalk.green('✓ Copilot connected\n'));
 
     // Step 3: Start MCP Server
