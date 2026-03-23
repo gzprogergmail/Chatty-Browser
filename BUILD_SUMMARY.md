@@ -315,3 +315,8 @@ npm start
 
 **Status: ✅ READY FOR USE**  
 **Last Updated: March 20, 2026**
+
+## Memory Layer Update
+
+The project now includes a SQLite-backed long-term memory service with `save_memory` and `query_memory`.
+That memory layer supports structured filters plus FTS search, returns short results for follow-up searches, and is documented in [MEMORY.md](MEMORY.md).

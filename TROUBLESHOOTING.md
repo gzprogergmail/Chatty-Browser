@@ -291,3 +291,9 @@ npm start
 # macOS/Linux  
 DEBUG=* npm start
 ```
+
+## Memory Database Issues
+
+The agent now stores reusable memory in `data/agent-memory.sqlite`.
+If the memory database becomes corrupted or you want to reset long-term memory, stop the app, delete that file, and start again; the schema will be recreated automatically.
+For the design and intended usage, see [MEMORY.md](MEMORY.md).

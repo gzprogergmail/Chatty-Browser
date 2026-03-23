@@ -59,3 +59,9 @@ You: exit
 ## Need Help?
 
 See the full [README.md](README.md) for detailed documentation.
+
+## Memory Notes
+
+The agent now keeps long-term reusable memory in `data/agent-memory.sqlite` and exposes `save_memory` plus `query_memory` to the LLM.
+That memory is intended for reusable site knowledge, workflows, and preferences rather than raw conversation dumps.
+See [MEMORY.md](MEMORY.md) for the full mechanism.

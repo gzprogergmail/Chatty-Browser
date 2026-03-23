@@ -5,3 +5,4 @@ dist/
 .auth-cache.json
 .playwright-state/
 logs/*
+data/

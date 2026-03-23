@@ -92,3 +92,9 @@ what's loaded in the browser?
 5. **Check State**: Ask "what page am I on?" to verify where you are
 
 6. **Use Natural Language**: The AI understands context, so speak naturally!
+
+## Memory-Aware Behavior
+
+The agent now has long-term memory tools backed by SQLite.
+When a task looks like something it has learned before, it can search prior knowledge with `query_memory`, refine the search using short hits, and save durable takeaways with `save_memory`.
+For the architecture and retrieval rules, see [MEMORY.md](MEMORY.md).

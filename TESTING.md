@@ -282,3 +282,8 @@ The application has been:
 - ⚠️ Ready for manual end-to-end testing (requires your GitHub Copilot account)
 
 The code is working correctly at the architectural level. The next step is for you to test it with real GitHub Copilot authentication!
+
+## Memory Test Coverage
+
+Long-term memory is now covered by `node test-memory.mjs`, and `npm test` includes that suite automatically.
+Those tests verify SQLite persistence, FTS-backed retrieval, exact memory reads by ID, and BrowserAgent wiring for the memory tools.

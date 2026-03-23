@@ -94,3 +94,10 @@ npm run demo       # mock demo mode (no auth needed)
 - `logs/` — runtime tool-call logs, auto-rotated
 - `.auth-cache.json` — cached OAuth token
 - `node_modules/`
+
+## Memory Guidance
+
+- The agent now has `query_memory` and `save_memory` tools backed by SQLite.
+- Use `query_memory` before re-learning a site-specific workflow or a repeated task.
+- Keep memory entries distilled and reusable; do not store raw transcripts or one-off noise.
+- Short search hits are expected to drive follow-up searches or exact reads by memory ID.

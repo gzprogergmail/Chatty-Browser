@@ -371,3 +371,9 @@ You now have a working AI agent that can:
 - Provide feedback in real-time
 
 Explore, experiment, and enjoy! 🚀
+
+## Memory Layer
+
+The app now creates a local SQLite memory database at `data/agent-memory.sqlite`.
+The model can use `query_memory` before re-learning a workflow and `save_memory` to store concise reusable lessons.
+See [MEMORY.md](MEMORY.md) for the memory schema, retrieval flow, and tool behavior.

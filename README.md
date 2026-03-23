@@ -168,3 +168,9 @@ MIT
 - GitHub Copilot for AI capabilities
 - Playwright for browser automation
 - Model Context Protocol for tool integration
+
+## Memory System
+
+The agent now includes a SQLite-backed long-term memory layer with `save_memory` and `query_memory` tools.
+The database lives at `data/agent-memory.sqlite`, uses FTS for retrieval, and is meant for distilled reusable knowledge rather than raw transcripts.
+See [MEMORY.md](MEMORY.md) for the full design and retrieval rules.

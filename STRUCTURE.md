@@ -283,3 +283,8 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions.
 ## License
 
 MIT - See package.json
+
+## Memory Components
+
+The codebase now includes `src/memory/memory-store.ts`, which provides the SQLite-backed long-term memory service and the `save_memory` / `query_memory` tools.
+Runtime memory data is stored in `data/agent-memory.sqlite`, and the full design is documented in [MEMORY.md](MEMORY.md).
