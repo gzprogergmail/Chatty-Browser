@@ -164,6 +164,51 @@ await test('BrowserAgent prepends relevant memory context before sending the pro
   });
 });
 
+await test('BrowserAgent uses bounded two-hop retrieval to expand related memory context', async () => {
+  await withTempManager('browser-agent-two-hop-prefetch', async (memoryManager) => {
+    memoryManager.saveMemory({
+      scope: 'workflow',
+      subject: 'invoice export',
+      summary: 'Always run verification before exporting invoices.',
+      tags: ['invoice', 'export', 'verification'],
+      confidence: 0.92,
+    });
+    memoryManager.saveMemory({
+      scope: 'workflow',
+      subject: 'totals check',
+      summary: 'Check totals before finalizing the workflow.',
+      tags: ['verification', 'totals'],
+      confidence: 0.88,
+    });
+
+    const captured = { prompts: [] };
+    const copilot = {
+      async sendMessage(prompt) {
+        captured.prompts.push(prompt);
+        return 'Expanded memory context.';
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+    await agent.executeCommand('export invoices');
+
+    assert.equal(captured.prompts.length, 1);
+    assert.match(captured.prompts[0], /Always run verification before exporting invoices\./);
+    assert.match(captured.prompts[0], /Check totals before finalizing the workflow\./);
+  });
+});
+
 await test('BrowserAgent sends the raw prompt when no relevant memory is found', async () => {
   await withTempManager('browser-agent-no-prefetch-hit', async (memoryManager) => {
     const captured = { prompts: [] };

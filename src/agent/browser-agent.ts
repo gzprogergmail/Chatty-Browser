@@ -4,6 +4,7 @@ import type { PremiumRequestsUsage } from '../copilot/copilot-client.js';
 import type { TokenUsageSnapshot } from '../copilot/copilot-client.js';
 import { MemoryManager } from '../memory/memory-store.js';
 import type { MemoryManagerOptions } from '../memory/memory-store.js';
+import type { MemorySearchResult } from '../memory/memory-store.js';
 import type { MemoryOperationEvent } from '../memory/memory-store.js';
 import type { MemorySidekickStatus } from '../memory/memory-store.js';
 import { MCPServerManager } from '../mcp/mcp-server-manager.js';
@@ -15,8 +16,26 @@ interface BrowserAgentOptions {
   memoryOptions?: Omit<MemoryManagerOptions, 'distiller'>;
 }
 
+interface PreflightMemoryCandidate {
+  memory: MemorySearchResult;
+  score: number;
+  hops: Set<number>;
+  matchedQueries: Set<string>;
+  matchedTags: Set<string>;
+  firstSeenOrder: number;
+}
+
+interface PreflightMemoryLookup {
+  hop1Queries: string[];
+  hop2Queries: string[];
+  memories: MemorySearchResult[];
+  matchedQueries: string[];
+}
+
 export class BrowserAgent {
   private readonly preflightMemoryLimit = 3;
+  private readonly preflightMemoryFinalLimit = 5;
+  private readonly preflightMemoryHopTwoQueryLimit = 5;
   private readonly preflightMemoryStopWords = new Set([
     'a', 'an', 'and', 'at', 'click', 'create', 'edit', 'fill', 'find', 'for', 'go', 'in',
     'launch', 'me', 'my', 'navigate', 'of', 'on', 'open', 'please', 'search', 'show', 'start',
@@ -174,8 +193,7 @@ If something goes wrong, explain the error and suggest alternatives.`;
 
   private buildPromptWithMemoryContext(userCommand: string): string {
     try {
-      const lookupQueries = this.buildPreflightMemoryQueries(userCommand);
-      const lookup = this.findRelevantMemoriesForPrompt(lookupQueries);
+      const lookup = this.findRelevantMemoriesForPrompt(userCommand);
 
       if (!lookup) {
         memoryOperationLogger.log({
@@ -183,14 +201,15 @@ If something goes wrong, explain the error and suggest alternatives.`;
           action: 'prompt.prefetch',
           payload: {
             query: userCommand,
-            lookupQueries,
+            hop1Queries: this.buildPreflightMemoryQueries(userCommand),
+            hop2Queries: [],
             injectedCount: 0,
           },
         });
         return userCommand;
       }
 
-      const context = lookup.results.memories
+      const context = lookup.memories
         .map((memory, index) => {
           const meta = `${memory.scope}, ${memory.status}, confidence ${memory.confidence.toFixed(2)}`;
           const detail = memory.detailsSnippet ? ` Details: ${memory.detailsSnippet}` : '';
@@ -203,11 +222,12 @@ If something goes wrong, explain the error and suggest alternatives.`;
         action: 'prompt.prefetch',
         payload: {
           query: userCommand,
-          lookupQueries,
-          matchedQuery: lookup.query,
-          injectedCount: lookup.results.memories.length,
-          memoryIds: lookup.results.memories.map((memory) => memory.id),
-          subjects: lookup.results.memories.map((memory) => memory.subject),
+          hop1Queries: lookup.hop1Queries,
+          hop2Queries: lookup.hop2Queries,
+          matchedQueries: lookup.matchedQueries,
+          injectedCount: lookup.memories.length,
+          memoryIds: lookup.memories.map((memory) => memory.id),
+          subjects: lookup.memories.map((memory) => memory.subject),
         },
       });
 
@@ -231,19 +251,37 @@ If something goes wrong, explain the error and suggest alternatives.`;
     }
   }
 
-  private findRelevantMemoriesForPrompt(lookupQueries: string[]): { query: string; results: ReturnType<MemoryManager['queryMemory']> } | null {
-    for (const query of lookupQueries) {
-      const results = this.memory.queryMemory({
-        query,
-        limit: this.preflightMemoryLimit,
-      });
+  private findRelevantMemoriesForPrompt(userCommand: string): PreflightMemoryLookup | null {
+    const hop1Queries = this.buildPreflightMemoryQueries(userCommand);
+    const candidates = new Map<number, PreflightMemoryCandidate>();
+    let seenOrder = 0;
 
-      if (results.count > 0) {
-        return { query, results };
-      }
+    this.collectPreflightCandidates(hop1Queries, 1, candidates, () => seenOrder++);
+    if (candidates.size === 0) {
+      return null;
     }
 
-    return null;
+    const hop2Queries = this.buildHopTwoQueries(
+      Array.from(candidates.values()).map((candidate) => candidate.memory),
+      new Set(hop1Queries),
+    );
+    this.collectPreflightCandidates(hop2Queries, 2, candidates, () => seenOrder++);
+
+    const orderedCandidates = Array.from(candidates.values())
+      .sort((a, b) => {
+        if (a.score !== b.score) return b.score - a.score;
+        return a.firstSeenOrder - b.firstSeenOrder;
+      })
+      .slice(0, this.preflightMemoryFinalLimit);
+
+    return {
+      hop1Queries,
+      hop2Queries,
+      memories: orderedCandidates.map((candidate) => candidate.memory),
+      matchedQueries: Array.from(new Set(
+        orderedCandidates.flatMap((candidate) => Array.from(candidate.matchedQueries)),
+      )),
+    };
   }
 
   private buildPreflightMemoryQueries(userCommand: string): string[] {
@@ -254,5 +292,62 @@ If something goes wrong, explain the error and suggest alternatives.`;
       .trim();
 
     return Array.from(new Set([normalized, reduced].filter(Boolean)));
+  }
+
+  private collectPreflightCandidates(
+    queries: string[],
+    hop: 1 | 2,
+    candidates: Map<number, PreflightMemoryCandidate>,
+    nextSeenOrder: () => number,
+  ): void {
+    for (const query of queries) {
+      const results = this.memory.queryMemory({
+        query,
+        limit: this.preflightMemoryLimit,
+      });
+
+      results.memories.forEach((memory, index) => {
+        const existing = candidates.get(memory.id);
+        const weight = (hop === 1 ? 100 : 45) - index * 5 + memory.confidence * 10 + (memory.status === 'active' ? 5 : 0);
+
+        if (existing) {
+          existing.score += weight + 8;
+          existing.hops.add(hop);
+          existing.matchedQueries.add(query);
+          memory.tags.forEach((tag) => existing.matchedTags.add(tag));
+          return;
+        }
+
+        candidates.set(memory.id, {
+          memory,
+          score: weight,
+          hops: new Set([hop]),
+          matchedQueries: new Set([query]),
+          matchedTags: new Set(memory.tags),
+          firstSeenOrder: nextSeenOrder(),
+        });
+      });
+    }
+  }
+
+  private buildHopTwoQueries(memories: MemorySearchResult[], usedQueries: Set<string>): string[] {
+    const queries: string[] = [];
+
+    for (const memory of memories) {
+      const subject = memory.subject.trim().toLowerCase();
+      if (subject && !usedQueries.has(subject)) {
+        queries.push(subject);
+      }
+
+      for (const tag of memory.tags) {
+        const normalizedTag = tag.trim().toLowerCase();
+        if (!normalizedTag || usedQueries.has(normalizedTag) || this.preflightMemoryStopWords.has(normalizedTag)) {
+          continue;
+        }
+        queries.push(normalizedTag);
+      }
+    }
+
+    return Array.from(new Set(queries)).slice(0, this.preflightMemoryHopTwoQueryLimit);
   }
 }
