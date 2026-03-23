@@ -41,13 +41,27 @@ async function test(label, fn) {
 async function captureConsole(fn) {
   const logs = [];
   const errors = [];
+  const writes = [];
   const originalLog = console.log;
   const originalError = console.error;
   const originalClear = console.clear;
+  const originalStdoutWrite = process.stdout.write.bind(process.stdout);
 
   console.log = (...args) => logs.push(stripAnsi(args.join(' ')));
   console.error = (...args) => errors.push(stripAnsi(args.join(' ')));
   console.clear = () => {};
+  process.stdout.write = (chunk, encoding, callback) => {
+    const value = typeof chunk === 'string' ? chunk : chunk.toString(typeof encoding === 'string' ? encoding : undefined);
+    writes.push(stripAnsi(value));
+
+    if (typeof encoding === 'function') {
+      encoding();
+    } else if (typeof callback === 'function') {
+      callback();
+    }
+
+    return true;
+  };
 
   try {
     await fn();
@@ -55,12 +69,14 @@ async function captureConsole(fn) {
     console.log = originalLog;
     console.error = originalError;
     console.clear = originalClear;
+    process.stdout.write = originalStdoutWrite;
   }
 
   return {
     logs,
     errors,
-    output: [...logs, ...errors].join('\n'),
+    writes,
+    output: [...logs, ...writes, ...errors].join('\n'),
   };
 }
 
@@ -91,6 +107,26 @@ console.log('\n── New Feature Regression Tests ─────────�
 await test('CopilotClient defaults to gpt-5-mini', async () => {
   const client = new CopilotClient();
   assert.equal(client.model, 'gpt-5-mini');
+});
+
+await test('CopilotClient creates SDK sessions with streaming enabled', async () => {
+  const client = new CopilotClient();
+  const captured = {};
+  client.sdkClient = {
+    async createSession(config) {
+      captured.config = config;
+      return {
+        sessionId: 'session-1',
+        on() {
+          return () => {};
+        },
+      };
+    },
+  };
+
+  await client.createSession([], async () => ({}), 'system prompt');
+
+  assert.equal(captured.config.streaming, true);
 });
 
 await test('CopilotClient token usage snapshot includes active model and reasoning', async () => {
@@ -128,6 +164,47 @@ await test('CopilotClient turn timeout can be updated and validated', async () =
   assert.equal(client.setTurnTimeoutMs(90_000), 90_000);
   assert.equal(client.getTurnTimeoutMs(), 90_000);
   assert.throws(() => client.setTurnTimeoutMs(999), /at least 1000 ms/);
+});
+
+await test('CopilotClient streams reasoning and response chunks during a turn', async () => {
+  const client = new CopilotClient();
+  const handlers = new Map();
+
+  const emit = (eventType, data) => {
+    for (const handler of handlers.get(eventType) ?? []) {
+      handler({ type: eventType, data });
+    }
+  };
+
+  client.session = {
+    on(eventType, handler) {
+      if (!handlers.has(eventType)) {
+        handlers.set(eventType, new Set());
+      }
+      handlers.get(eventType).add(handler);
+      return () => handlers.get(eventType).delete(handler);
+    },
+    async sendAndWait({ prompt }, timeoutMs) {
+      assert.equal(prompt, 'hello');
+      assert.equal(timeoutMs, 300_000);
+      emit('assistant.reasoning_delta', { deltaContent: 'Thinking step 1. ' });
+      emit('assistant.reasoning_delta', { deltaContent: 'Thinking step 2.' });
+      emit('assistant.message_delta', { deltaContent: 'Final answer.' });
+      return { data: { content: 'Final answer.' } };
+    },
+  };
+
+  const { output } = await captureConsole(async () => {
+    const response = await client.sendMessage('hello');
+    assert.equal(response, 'Final answer.');
+  });
+
+  assert.equal(client.didStreamLastTurn(), true);
+  assert.match(output, /Thinking:/);
+  assert.match(output, /Thinking step 1\./);
+  assert.match(output, /Thinking step 2\./);
+  assert.match(output, /Response:/);
+  assert.match(output, /Final answer\./);
 });
 
 await test('CopilotClient premium usage prefers the premium_interactions quota', async () => {
@@ -319,6 +396,9 @@ await test('CLI prints model name alongside token usage after a normal turn', as
     getTokenUsage() {
       return { model: 'gpt-5.4', used: 300, max: 1200, compacting: false };
     },
+    didStreamLastTurn() {
+      return false;
+    },
   };
   const cli = new CLIInterface(agent);
 
@@ -334,6 +414,38 @@ await test('CLI prints model name alongside token usage after a normal turn', as
 
   assert.equal(executed, 1);
   assert.match(output, /Context \[gpt-5\.4\]: \[[^\]]+\] ~300 \/ 1,200 tokens \(25\.0%\)/);
+});
+
+await test('CLI does not duplicate the final answer after a streamed turn', async () => {
+  const agent = {
+    async executeCommand(command) {
+      assert.equal(command, 'stream please');
+      process.stdout.write('   💭 Thinking:\nAnalyzing...\n');
+      process.stdout.write('   🤖 Response:\nDone.\n');
+      return 'Done.';
+    },
+    didStreamLastTurn() {
+      return true;
+    },
+    getTokenUsage() {
+      return { model: 'gpt-5-mini', used: 100, max: 1000, compacting: false };
+    },
+  };
+  const cli = new CLIInterface(agent);
+
+  const { output } = await withPromptMock(
+    [
+      () => ({ command: 'stream please' }),
+      { isTtyError: true },
+    ],
+    () => captureConsole(async () => {
+      await cli.start();
+    }),
+  );
+
+  assert.match(output, /Thinking:/);
+  assert.match(output, /Response:/);
+  assert.doesNotMatch(output, /🤖 Agent: Done\./);
 });
 
 await test('CLI /usage command calls the agent and prints the remaining premium allowance', async () => {

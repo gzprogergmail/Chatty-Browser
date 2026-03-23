@@ -72,8 +72,12 @@ export class CLIInterface {
         console.log(chalk.gray('\n🤖 Agent: Processing...\n'));
         
         const response = await this.agent.executeCommand(trimmedCommand);
-        
-        console.log(chalk.green(`\n🤖 Agent: ${response}\n`));
+
+        if (this.agent.didStreamLastTurn()) {
+          process.stdout.write('\n');
+        } else {
+          console.log(chalk.green(`\n🤖 Agent: ${response}\n`));
+        }
 
         // Show token usage after every response
         this.showTokenUsage();

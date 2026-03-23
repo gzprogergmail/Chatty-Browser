@@ -64,6 +64,10 @@ If something goes wrong, explain the error and suggest alternatives.`;
     return this.copilot.sendMessage(userCommand);
   }
 
+  didStreamLastTurn(): boolean {
+    return this.copilot.didStreamLastTurn();
+  }
+
   /** Start a fresh session (used by /new command). */
   async newSession(): Promise<void> {
     return this.copilot.newSession();

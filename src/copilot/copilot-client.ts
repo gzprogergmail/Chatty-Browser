@@ -125,6 +125,14 @@ export interface PremiumRequestsUsage {
   resetDate?: string;
 }
 
+interface LiveTurnStreamState {
+  activeSection: 'reasoning' | 'message' | null;
+  endedWithNewline: boolean;
+  wroteContent: boolean;
+  sawReasoningDelta: boolean;
+  sawMessageDelta: boolean;
+}
+
 /**
  * Wrapper around the official @github/copilot-sdk.
  *
@@ -160,6 +168,8 @@ export class CopilotClient {
   private sdkTokenLimit = 128_000; // fallback until first usage_info event
   private compacting = false;
   private sdkMessagesLength = 0;
+  private liveTurnStreamState: LiveTurnStreamState | null = null;
+  private lastTurnStreamed = false;
 
   async initialize(
     model: string = 'gpt-5-mini',
@@ -224,6 +234,7 @@ export class CopilotClient {
 
     this.session = await this.sdkClient!.createSession({
       model: this.model,
+      streaming: true,
       ...(this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : {}),
       tools: sdkTools,
       availableTools: [...mcpTools.map(t => t.name), 'web_fetch'],
@@ -275,6 +286,7 @@ export class CopilotClient {
       hooks: {
         // ── Pre-tool hook: print + log every call, confirm dangerous HTTP ──────
         onPreToolUse: async ({ toolName, toolArgs }) => {
+          this.flushLiveTurnStream();
           // 1. Print the tool invocation to the console in real-time.
           process.stdout.write(this.formatTokenUsageLine('Context before tool'));
           process.stdout.write(
@@ -307,6 +319,7 @@ export class CopilotClient {
         // ── Post-tool hook: log every result ────────────────────────────────
         onPostToolUse: async ({ toolName, toolArgs, toolResult }) => {
           toolLogger.log({ type: 'result', tool: toolName, args: toolArgs, result: toolResult });
+          this.flushLiveTurnStream();
           process.stdout.write(this.formatTokenUsageLine(`Context after ${toolName}`));
         },
       },
@@ -342,13 +355,57 @@ export class CopilotClient {
     if (!this.session) {
       throw new Error('No active session. Call createSession() first.');
     }
+    const streamState: LiveTurnStreamState = {
+      activeSection: null,
+      endedWithNewline: true,
+      wroteContent: false,
+      sawReasoningDelta: false,
+      sawMessageDelta: false,
+    };
+    this.liveTurnStreamState = streamState;
+    this.lastTurnStreamed = false;
+
+    const unsubscribers = [
+      this.session.on('assistant.reasoning_delta', (event) => {
+        if (!event.data.deltaContent) return;
+        streamState.sawReasoningDelta = true;
+        this.writeLiveTurnChunk('reasoning', event.data.deltaContent, streamState);
+      }),
+      this.session.on('assistant.message_delta', (event) => {
+        if (!event.data.deltaContent) return;
+        streamState.sawMessageDelta = true;
+        this.writeLiveTurnChunk('message', event.data.deltaContent, streamState);
+      }),
+      this.session.on('assistant.reasoning', (event) => {
+        if (streamState.sawReasoningDelta || !event.data.content?.trim()) return;
+        this.writeLiveTurnChunk('reasoning', event.data.content, streamState);
+      }),
+      this.session.on('assistant.message', (event) => {
+        if (streamState.sawMessageDelta || event.data.toolRequests?.length || !event.data.content?.trim()) return;
+        this.writeLiveTurnChunk('message', event.data.content, streamState);
+      }),
+    ];
+
     process.stdout.write(
       chalk.gray(`   🧠 Queueing prompt for ${this.model}${this.reasoningEffort ? ` (${this.reasoningEffort})` : ''}`) + '\n',
     );
-    const response = await this.session.sendAndWait({ prompt: message }, timeoutMs);
-    const content: string = response?.data?.content ?? '';
-    process.stdout.write(chalk.gray('   ✅ Turn complete') + '\n');
-    return content;
+    try {
+      const response = await this.session.sendAndWait({ prompt: message }, timeoutMs);
+      const content: string = response?.data?.content ?? '';
+      this.flushLiveTurnStream();
+      this.lastTurnStreamed = streamState.wroteContent;
+      process.stdout.write(chalk.gray('   ✅ Turn complete') + '\n');
+      return content;
+    } finally {
+      this.flushLiveTurnStream(streamState);
+      this.lastTurnStreamed = this.lastTurnStreamed || streamState.wroteContent;
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+      this.liveTurnStreamState = null;
+    }
+  }
+
+  didStreamLastTurn(): boolean {
+    return this.lastTurnStreamed;
   }
 
   getTurnTimeoutMs(): number {
@@ -454,6 +511,30 @@ export class CopilotClient {
     const compactingTag = this.compacting ? chalk.cyan(' [compacting]') : '';
     const messages = this.sdkMessagesLength > 0 ? `, ${this.sdkMessagesLength} msgs` : '';
     return colour(`   ${label} [${this.getActiveModelDisplay()}]: ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%${messages})`) + compactingTag + '\n';
+  }
+
+  private writeLiveTurnChunk(section: 'reasoning' | 'message', text: string, state: LiveTurnStreamState): void {
+    this.lastTurnStreamed = true;
+
+    if (state.activeSection !== section) {
+      this.flushLiveTurnStream(state);
+      const heading = section === 'reasoning'
+        ? chalk.cyan('\n   💭 Thinking:\n')
+        : chalk.green('\n   🤖 Response:\n');
+      process.stdout.write(heading);
+      state.activeSection = section;
+      state.endedWithNewline = true;
+    }
+
+    process.stdout.write(section === 'reasoning' ? chalk.gray(text) : chalk.green(text));
+    state.wroteContent = true;
+    state.endedWithNewline = text.endsWith('\n');
+  }
+
+  private flushLiveTurnStream(state: LiveTurnStreamState | null = this.liveTurnStreamState): void {
+    if (!state || !state.wroteContent || state.endedWithNewline) return;
+    process.stdout.write('\n');
+    state.endedWithNewline = true;
   }
 
   private createTelemetryFilePath(): string {
