@@ -1,5 +1,7 @@
 # Memory Mechanism
 
+Detailed package-level documentation now lives in [packages/chatty-memory/README.md](/c:/dl/SelfContainedAgent/packages/chatty-memory/README.md).
+
 ## Overview
 
 The agent now has a SQLite-backed long-term memory layer designed to reduce repeated relearning across sessions.
