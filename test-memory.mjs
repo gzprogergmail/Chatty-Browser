@@ -123,6 +123,76 @@ await test('BrowserAgent routes browser tools to MCP and memory tools to the pac
   });
 });
 
+await test('BrowserAgent prepends relevant memory context before sending the prompt to Copilot', async () => {
+  await withTempManager('browser-agent-prefetch', async (memoryManager) => {
+    memoryManager.saveMemory({
+      scope: 'site',
+      subject: 'canva uploads',
+      summary: 'Canva uploads are in the left sidebar Uploads panel.',
+      details: 'Open Uploads from the left rail instead of Apps.',
+      tags: ['canva', 'uploads'],
+      confidence: 0.95,
+    });
+
+    const captured = { prompts: [] };
+    const copilot = {
+      async sendMessage(prompt) {
+        captured.prompts.push(prompt);
+        return 'Found it.';
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+    const response = await agent.executeCommand('Open Canva uploads');
+
+    assert.equal(response, 'Found it.');
+    assert.equal(captured.prompts.length, 1);
+    assert.match(captured.prompts[0], /Relevant memory context:/);
+    assert.match(captured.prompts[0], /Canva uploads are in the left sidebar Uploads panel\./);
+    assert.match(captured.prompts[0], /Live user request:\nOpen Canva uploads/);
+  });
+});
+
+await test('BrowserAgent sends the raw prompt when no relevant memory is found', async () => {
+  await withTempManager('browser-agent-no-prefetch-hit', async (memoryManager) => {
+    const captured = { prompts: [] };
+    const copilot = {
+      async sendMessage(prompt) {
+        captured.prompts.push(prompt);
+        return 'No memory hit.';
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+    const response = await agent.executeCommand('Search for quarterly earnings');
+
+    assert.equal(response, 'No memory hit.');
+    assert.deepStrictEqual(captured.prompts, ['Search for quarterly earnings']);
+  });
+});
+
 await test('BrowserAgent records turns and exposes sidekick status from the package manager', async () => {
   const dir = path.join(process.cwd(), 'test-artifacts', 'browser-agent-sidekick');
   fs.rmSync(dir, { recursive: true, force: true });

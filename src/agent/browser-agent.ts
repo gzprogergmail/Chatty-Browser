@@ -16,6 +16,12 @@ interface BrowserAgentOptions {
 }
 
 export class BrowserAgent {
+  private readonly preflightMemoryLimit = 3;
+  private readonly preflightMemoryStopWords = new Set([
+    'a', 'an', 'and', 'at', 'click', 'create', 'edit', 'fill', 'find', 'for', 'go', 'in',
+    'launch', 'me', 'my', 'navigate', 'of', 'on', 'open', 'please', 'search', 'show', 'start',
+    'tell', 'the', 'to', 'use', 'with',
+  ]);
   private readonly systemPrompt = `You are a helpful AI assistant that controls a web browser using Playwright.
 You have access to various browser automation tools through the MCP (Model Context Protocol) server.
 You also have long-term memory tools:
@@ -32,6 +38,7 @@ Before re-learning how a site, workflow, or user preference works, use query_mem
 query_memory results are intentionally compact. If the first search is only partially helpful, do a follow-up search with refined terms based on the short hits, or read specific memory IDs in full.
 Use save_memory after discovering something likely to help future sessions, but save distilled reusable knowledge instead of raw transcripts or one-off details.
 If a new discovery overturns an older memory, save the corrected memory and mark the older memory IDs as superseded or invalidated.
+The app may prepend a "Relevant memory context" section before the live user request. Treat it as retrieved long-term memory: use it when helpful, but still verify anything time-sensitive or page-state-specific against the current browser state.
 Available actions typically include:
 - playwright_navigate(url): Navigate to a URL
 - playwright_click(selector): Click an element
@@ -93,7 +100,8 @@ If something goes wrong, explain the error and suggest alternatives.`;
     // The official SDK drives the entire agentic loop (tool calls → results
     // → follow-up turns) automatically.  We just send the user's request and
     // receive the final narrative response.
-    const response = await this.copilot.sendMessage(userCommand);
+    const prompt = this.buildPromptWithMemoryContext(userCommand);
+    const response = await this.copilot.sendMessage(prompt);
 
     if (response.trim()) {
       this.memory.recordConversationMessage({
@@ -162,5 +170,89 @@ If something goes wrong, explain the error and suggest alternatives.`;
     }
 
     return this.mcp.callTool(name, args);
+  }
+
+  private buildPromptWithMemoryContext(userCommand: string): string {
+    try {
+      const lookupQueries = this.buildPreflightMemoryQueries(userCommand);
+      const lookup = this.findRelevantMemoriesForPrompt(lookupQueries);
+
+      if (!lookup) {
+        memoryOperationLogger.log({
+          category: 'memory',
+          action: 'prompt.prefetch',
+          payload: {
+            query: userCommand,
+            lookupQueries,
+            injectedCount: 0,
+          },
+        });
+        return userCommand;
+      }
+
+      const context = lookup.results.memories
+        .map((memory, index) => {
+          const meta = `${memory.scope}, ${memory.status}, confidence ${memory.confidence.toFixed(2)}`;
+          const detail = memory.detailsSnippet ? ` Details: ${memory.detailsSnippet}` : '';
+          return `${index + 1}. [Memory ${memory.id}] ${memory.subject} (${meta})\n   Summary: ${memory.summary}${detail}`;
+        })
+        .join('\n');
+
+      memoryOperationLogger.log({
+        category: 'memory',
+        action: 'prompt.prefetch',
+        payload: {
+          query: userCommand,
+          lookupQueries,
+          matchedQuery: lookup.query,
+          injectedCount: lookup.results.memories.length,
+          memoryIds: lookup.results.memories.map((memory) => memory.id),
+          subjects: lookup.results.memories.map((memory) => memory.subject),
+        },
+      });
+
+      return [
+        'Relevant memory context:',
+        context,
+        '',
+        'Live user request:',
+        userCommand,
+      ].join('\n');
+    } catch (error) {
+      memoryOperationLogger.log({
+        category: 'memory',
+        action: 'prompt.prefetch_failed',
+        payload: {
+          query: userCommand,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return userCommand;
+    }
+  }
+
+  private findRelevantMemoriesForPrompt(lookupQueries: string[]): { query: string; results: ReturnType<MemoryManager['queryMemory']> } | null {
+    for (const query of lookupQueries) {
+      const results = this.memory.queryMemory({
+        query,
+        limit: this.preflightMemoryLimit,
+      });
+
+      if (results.count > 0) {
+        return { query, results };
+      }
+    }
+
+    return null;
+  }
+
+  private buildPreflightMemoryQueries(userCommand: string): string[] {
+    const normalized = userCommand.trim();
+    const reduced = (normalized.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+      .filter((token) => !this.preflightMemoryStopWords.has(token))
+      .join(' ')
+      .trim();
+
+    return Array.from(new Set([normalized, reduced].filter(Boolean)));
   }
 }
