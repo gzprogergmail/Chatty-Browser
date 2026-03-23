@@ -309,6 +309,7 @@ await test('BrowserAgent system prompt prefers autonomous research and default b
   assert.match(prompt, /use the browser to research it, make the best-supported guess/);
   assert.match(prompt, /mark the older memory IDs as superseded or invalidated/);
   assert.match(prompt, /Relevant memory context/);
+  assert.match(prompt, /queries array with up to 5 alternate phrasings/);
 });
 
 await test('CLI help text lists the memory and usage commands', async () => {

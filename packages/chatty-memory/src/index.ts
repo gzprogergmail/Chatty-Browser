@@ -32,6 +32,7 @@ export interface SaveMemoryArgs {
 
 export interface QueryMemoryArgs {
   query?: string;
+  queries?: string[];
   scope?: MemoryScope;
   subject?: string;
   tags?: string[];
@@ -85,6 +86,7 @@ export interface QueryMemoryResult {
   mode: 'search' | 'read';
   count: number;
   query?: string;
+  attemptedQueries?: string[];
   filters?: {
     scope?: string;
     subject?: string;
@@ -294,6 +296,12 @@ export class MemoryStore {
               type: 'string',
               description: 'Natural language search query. Use this first for broad lookup and follow-up refinement.',
             },
+            queries: {
+              type: 'array',
+              items: { type: 'string' },
+              maxItems: 5,
+              description: 'Optional alternative search phrasings. Use up to 5 variants when the first wording may miss useful memory.',
+            },
             scope: {
               type: 'string',
               enum: MEMORY_SCOPES,
@@ -479,24 +487,36 @@ export class MemoryStore {
     }
 
     const limit = this.normalizeLimit(args.limit);
-    const query = this.normalizeOptionalText(args.query);
+    const attemptedQueries = this.normalizeQueryList(args.query, args.queries);
+    const query = attemptedQueries[0];
     const scope = this.normalizeScope(args.scope, false);
     const subject = this.normalizeOptionalText(args.subject);
     const tags = this.normalizeTags(args.tags);
-    const memories = this.searchMemories({
-      query,
-      scope,
-      subject,
-      tags,
-      limit,
-      includeFullDetails,
-      statuses,
-    });
+    const memories = attemptedQueries.length <= 1
+      ? this.searchMemories({
+          query,
+          scope,
+          subject,
+          tags,
+          limit,
+          includeFullDetails,
+          statuses,
+        })
+      : this.searchMemoriesAcrossQueries({
+          queries: attemptedQueries,
+          scope,
+          subject,
+          tags,
+          limit,
+          includeFullDetails,
+          statuses,
+        });
 
     return {
       mode: 'search',
       count: memories.length,
       query,
+      attemptedQueries,
       filters: {
         scope,
         subject,
@@ -506,8 +526,12 @@ export class MemoryStore {
         statuses,
       },
       summary: memories.length > 0
-        ? `Found ${memories.length} memory hit${memories.length === 1 ? '' : 's'} for iterative follow-up search or direct reuse.`
-        : 'No matching memories found.',
+        ? attemptedQueries.length > 1
+          ? `Found ${memories.length} memory hit${memories.length === 1 ? '' : 's'} across ${attemptedQueries.length} search variants for iterative follow-up search or direct reuse.`
+          : `Found ${memories.length} memory hit${memories.length === 1 ? '' : 's'} for iterative follow-up search or direct reuse.`
+        : attemptedQueries.length > 1
+          ? `No matching memories found across ${attemptedQueries.length} search variants.`
+          : 'No matching memories found.',
       memories,
     };
   }
@@ -878,6 +902,56 @@ export class MemoryStore {
     ));
   }
 
+  private searchMemoriesAcrossQueries(options: {
+    queries: string[];
+    scope?: string;
+    subject?: string;
+    tags: string[];
+    limit: number;
+    includeFullDetails: boolean;
+    statuses?: MemoryStatus[];
+  }): MemorySearchResult[] {
+    const merged = new Map<number, { memory: MemorySearchResult; score: number; firstSeenOrder: number }>();
+    let seenOrder = 0;
+
+    for (const query of options.queries) {
+      const results = this.searchMemories({
+        query,
+        scope: options.scope,
+        subject: options.subject,
+        tags: options.tags,
+        limit: options.limit,
+        includeFullDetails: options.includeFullDetails,
+        statuses: options.statuses,
+      });
+
+      results.forEach((memory, index) => {
+        const existing = merged.get(memory.id);
+        const weight = 100 - index * 8 + memory.confidence * 10 + (memory.status === 'active' ? 5 : 0);
+
+        if (existing) {
+          existing.score += weight + 10;
+          existing.memory.matchReasons = Array.from(new Set([...existing.memory.matchReasons, ...memory.matchReasons]));
+          return;
+        }
+
+        merged.set(memory.id, {
+          memory,
+          score: weight,
+          firstSeenOrder: seenOrder++,
+        });
+      });
+    }
+
+    return Array.from(merged.values())
+      .sort((a, b) => {
+        if (a.score !== b.score) return b.score - a.score;
+        return a.firstSeenOrder - b.firstSeenOrder;
+      })
+      .slice(0, options.limit)
+      .map((entry) => entry.memory);
+  }
+
   private readMemories(memoryIds: number[], includeFullDetails: boolean): MemorySearchResult[] {
     const placeholders = memoryIds.map(() => '?').join(', ');
     const rows = this.db.prepare(
@@ -1062,6 +1136,14 @@ export class MemoryStore {
   private normalizeLimit(limit?: number): number {
     if (!Number.isInteger(limit)) return DEFAULT_LIMIT;
     return Math.min(MAX_LIMIT, Math.max(1, limit ?? DEFAULT_LIMIT));
+  }
+
+  private normalizeQueryList(query?: string, queries?: string[]): string[] {
+    return Array.from(new Set(
+      [query, ...(queries ?? [])]
+        .map((value) => this.normalizeOptionalText(value))
+        .filter((value): value is string => Boolean(value)),
+    )).slice(0, 5);
   }
 
   private normalizeMemoryIds(memoryIds?: number[]): number[] {

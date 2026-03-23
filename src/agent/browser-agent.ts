@@ -57,6 +57,8 @@ If what to open is not fully clear, use the browser to research it, make the bes
 Only ask the user for clarification when the ambiguity creates a meaningful risk of taking the wrong action or when multiple plausible choices would lead to materially different outcomes.
 Before re-learning how a site, workflow, or user preference works, use query_memory to check whether a prior session already discovered something reusable.
 query_memory results are intentionally compact. If the first search is only partially helpful, do a follow-up search with refined terms based on the short hits, or read specific memory IDs in full.
+query_memory also supports a queries array with up to 5 alternate phrasings, abbreviations, or likely synonyms in one call. Use that when memory lookup is ambiguous or the first wording may miss useful memory.
+If a memory search comes back empty, try a few alternate phrasings before giving up.
 Use save_memory after discovering something likely to help future sessions, but save distilled reusable knowledge instead of raw transcripts or one-off details.
 If a new discovery overturns an older memory, save the corrected memory and mark the older memory IDs as superseded or invalidated.
 The app may prepend a "Relevant memory context" section before the live user request. Treat it as retrieved long-term memory: use it when helpful, but still verify anything time-sensitive or page-state-specific against the current browser state.

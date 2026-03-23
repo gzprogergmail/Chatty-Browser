@@ -209,6 +209,42 @@ await test('MemoryStore persists related memory edges and returns them in query 
   });
 });
 
+await test('MemoryStore can aggregate up to five alternate search phrasings in one query', async () => {
+  await withTempStore('multi-query-search', async (_dir, dbPath) => {
+    const store = new MemoryStore(dbPath);
+
+    try {
+      store.saveMemory({
+        scope: 'site',
+        subject: 'bellevue school district tyee',
+        summary: 'BSD 405 non-school days apply to Tyee unless the school posts a special schedule.',
+        tags: ['bsd', 'tyee', 'calendar'],
+      });
+
+      const results = store.queryMemory({
+        queries: [
+          'none school day of tyee bsd',
+          'non school day tyee',
+          'bsd 405 tyee calendar',
+        ],
+        limit: 5,
+      });
+
+      assert.equal(results.mode, 'search');
+      assert.deepStrictEqual(results.attemptedQueries, [
+        'none school day of tyee bsd',
+        'non school day tyee',
+        'bsd 405 tyee calendar',
+      ]);
+      assert.equal(results.count, 1);
+      assert.match(results.summary, /across 3 search variants/);
+      assert.equal(results.memories[0].subject, 'bellevue school district tyee');
+    } finally {
+      store.close();
+    }
+  });
+});
+
 await test('MemoryManager runs the sidekick distiller asynchronously and persists corrections', async () => {
   await withTempStore('sidekick-distillation', async (_dir, dbPath) => {
     let distillerCalls = 0;
