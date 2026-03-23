@@ -1,5 +1,7 @@
 import { CopilotClient } from '../copilot/copilot-client.js';
 import type { AvailableModel } from '../copilot/copilot-client.js';
+import type { PremiumRequestsUsage } from '../copilot/copilot-client.js';
+import type { TokenUsageSnapshot } from '../copilot/copilot-client.js';
 import { MCPServerManager } from '../mcp/mcp-server-manager.js';
 import chalk from 'chalk';
 
@@ -61,7 +63,11 @@ If something goes wrong, explain the error and suggest alternatives.`;
   }
 
   /** Approximate token usage for the current conversation. */
-  getTokenUsage(): { used: number; max: number; compacting: boolean } {
+  getTokenUsage(): TokenUsageSnapshot {
     return this.copilot.getTokenUsage();
+  }
+
+  async getPremiumRequestsUsage(): Promise<PremiumRequestsUsage> {
+    return this.copilot.getPremiumRequestsUsage();
   }
 }

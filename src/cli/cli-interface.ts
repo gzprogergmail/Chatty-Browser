@@ -58,6 +58,11 @@ export class CLIInterface {
           continue;
         }
 
+        if (trimmedCommand.toLowerCase() === '/usage') {
+          await this.showPremiumRequestsUsage();
+          continue;
+        }
+
         // Execute the command through the agent
         console.log(chalk.gray('\n🤖 Agent: Processing...\n'));
         
@@ -90,6 +95,7 @@ export class CLIInterface {
     console.log(chalk.gray('    - "Fill in the form with my email"'));
     console.log('\n  Special commands:');
     console.log('  • /model - Choose from the live Copilot model list');
+    console.log('  • /usage - Show remaining Copilot premium requests allowance');
     console.log('  • /new  - Start a new session (clears conversation history)');
     console.log('  • help  - Show this help message');
     console.log('  • clear - Clear the screen');
@@ -119,12 +125,28 @@ export class CLIInterface {
   }
 
   private showTokenUsage() {
-    const { used, max, compacting } = this.agent.getTokenUsage();
+    const { model, used, max, compacting } = this.agent.getTokenUsage();
     const pct = ((used / max) * 100).toFixed(1);
     const bar = this.buildBar(used, max, 20);
     const colour = used / max > 0.85 ? chalk.red : used / max > 0.60 ? chalk.yellow : chalk.gray;
     const compactingTag = compacting ? chalk.cyan(' [⏳ compacting...]') : '';
-    console.log(colour(`   Context: ${bar} ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)`) + compactingTag + '\n');
+    console.log(colour(`   Context [${model}]: ${bar} ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)`) + compactingTag + '\n');
+  }
+
+  private async showPremiumRequestsUsage() {
+    const usage = await this.agent.getPremiumRequestsUsage();
+    const percent = (usage.remainingPercentage * 100).toFixed(1);
+    const resetText = usage.resetDate
+      ? new Date(usage.resetDate).toLocaleString()
+      : 'unknown';
+    const overageText = usage.overageAllowedWithExhaustedQuota ? 'allowed' : 'not allowed';
+
+    console.log(chalk.cyan('\n📊 Copilot Premium Usage\n'));
+    console.log(`   Quota: ${usage.quotaName}`);
+    console.log(`   Remaining: ${usage.remainingRequests.toLocaleString()} / ${usage.entitlementRequests.toLocaleString()} requests (${percent}%)`);
+    console.log(`   Used: ${usage.usedRequests.toLocaleString()} requests`);
+    console.log(`   Overage: ${usage.overage.toLocaleString()} (${overageText})`);
+    console.log(`   Reset: ${resetText}\n`);
   }
 
   private buildBar(used: number, max: number, width: number): string {

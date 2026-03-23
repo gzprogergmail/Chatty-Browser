@@ -107,6 +107,24 @@ export interface AvailableModel {
   warning?: string;
 }
 
+export interface TokenUsageSnapshot {
+  model: string;
+  used: number;
+  max: number;
+  compacting: boolean;
+}
+
+export interface PremiumRequestsUsage {
+  quotaName: string;
+  entitlementRequests: number;
+  usedRequests: number;
+  remainingRequests: number;
+  remainingPercentage: number;
+  overage: number;
+  overageAllowedWithExhaustedQuota: boolean;
+  resetDate?: string;
+}
+
 /**
  * Wrapper around the official @github/copilot-sdk.
  *
@@ -380,8 +398,37 @@ export class CopilotClient {
     return selected;
   }
 
-  getTokenUsage(): { used: number; max: number; compacting: boolean } {
-    return { used: this.sdkCurrentTokens, max: this.sdkTokenLimit, compacting: this.compacting };
+  getTokenUsage(): TokenUsageSnapshot {
+    return {
+      model: this.getActiveModelDisplay(),
+      used: this.sdkCurrentTokens,
+      max: this.sdkTokenLimit,
+      compacting: this.compacting,
+    };
+  }
+
+  async getPremiumRequestsUsage(): Promise<PremiumRequestsUsage> {
+    const quota = await this.sdkClient!.rpc.account.getQuota();
+    const entries = Object.entries(quota.quotaSnapshots);
+    const premiumEntry =
+      entries.find(([name]) => name === 'premium_interactions') ??
+      entries.find(([name]) => /premium/i.test(name));
+
+    if (!premiumEntry) {
+      throw new Error('Copilot did not return a premium request quota snapshot for this account.');
+    }
+
+    const [quotaName, snapshot] = premiumEntry;
+    return {
+      quotaName,
+      entitlementRequests: snapshot.entitlementRequests,
+      usedRequests: snapshot.usedRequests,
+      remainingRequests: Math.max(snapshot.entitlementRequests - snapshot.usedRequests, 0),
+      remainingPercentage: snapshot.remainingPercentage,
+      overage: snapshot.overage,
+      overageAllowedWithExhaustedQuota: snapshot.overageAllowedWithExhaustedQuota,
+      resetDate: snapshot.resetDate,
+    };
   }
 
   private formatTokenUsageLine(label: string): string {
@@ -392,7 +439,7 @@ export class CopilotClient {
     const colour = ratio > 0.85 ? chalk.red : ratio > 0.60 ? chalk.yellow : chalk.gray;
     const compactingTag = this.compacting ? chalk.cyan(' [compacting]') : '';
     const messages = this.sdkMessagesLength > 0 ? `, ${this.sdkMessagesLength} msgs` : '';
-    return colour(`   ${label}: ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%${messages})`) + compactingTag + '\n';
+    return colour(`   ${label} [${this.getActiveModelDisplay()}]: ~${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%${messages})`) + compactingTag + '\n';
   }
 
   private createTelemetryFilePath(): string {
@@ -429,6 +476,10 @@ export class CopilotClient {
       return `${model.name} does not advertise reasoning-effort support in Copilot, so no reasoning level is applied.`;
     }
     return undefined;
+  }
+
+  private getActiveModelDisplay(): string {
+    return this.reasoningEffort ? `${this.model} (${this.reasoningEffort})` : this.model;
   }
 
   async stop(): Promise<void> {
