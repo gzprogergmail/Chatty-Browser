@@ -238,6 +238,57 @@ await test('MemoryManager runs the sidekick distiller asynchronously and persist
   });
 });
 
+await test('MemoryManager defers sidekick startup and emits operation events for scheduling and persistence', async () => {
+  await withTempStore('sidekick-deferred-start', async (_dir, dbPath) => {
+    const operationEvents = [];
+    let distillerStarted = false;
+    const manager = new MemoryManager({
+      dbPath,
+      distillationThresholdTokens: 5,
+      async distiller() {
+        distillerStarted = true;
+        return {
+          summary: 'Saved one preference.',
+          memories: [
+            {
+              scope: 'user',
+              subject: 'response style',
+              summary: 'The user prefers concise updates.',
+              tags: ['user', 'style'],
+            },
+          ],
+        };
+      },
+    });
+
+    manager.on('operation', (event) => {
+      operationEvents.push(event);
+    });
+
+    try {
+      manager.recordConversationTurn([
+        { role: 'user', content: 'Keep updates concise.', tokenEstimate: 3, source: 'user-command' },
+        { role: 'assistant', content: 'I will keep updates concise.', tokenEstimate: 4, source: 'assistant-response' },
+      ]);
+
+      manager.maybeScheduleDistillation();
+
+      assert.equal(distillerStarted, false);
+      assert.equal(manager.getSidekickStatus().state, 'pending');
+      assert.ok(operationEvents.some((event) => event.category === 'distillation' && event.action === 'scheduled'));
+
+      await manager.flushSidekick();
+
+      assert.equal(distillerStarted, true);
+      assert.ok(operationEvents.some((event) => event.category === 'distillation' && event.action === 'started'));
+      assert.ok(operationEvents.some((event) => event.category === 'memory' && event.action === 'saved'));
+      assert.ok(operationEvents.some((event) => event.category === 'distillation' && event.action === 'completed'));
+    } finally {
+      manager.close();
+    }
+  });
+});
+
 console.log(`\n${'─'.repeat(68)}`);
 console.log(`  Tests: ${passed + failed}  |  Passed: \x1b[32m${passed}\x1b[0m  |  Failed: \x1b[31m${failed}\x1b[0m`);
 console.log(`${'─'.repeat(68)}\n`);

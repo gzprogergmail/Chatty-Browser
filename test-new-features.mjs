@@ -458,6 +458,86 @@ await test('CLI does not duplicate the final answer after a streamed turn', asyn
   assert.match(output, /Memory sidekick: running \(2,300 \/ 2,000 pending tokens, last: Saved one item\./);
 });
 
+await test('CLI prints lightweight live feedback for background memory work', async () => {
+  let statusListener = null;
+  const agent = {
+    onMemorySidekickStatusChange(listener) {
+      statusListener = listener;
+      return () => {
+        statusListener = null;
+      };
+    },
+    async executeCommand(command) {
+      assert.equal(command, 'remember this');
+      setTimeout(() => {
+        statusListener?.({
+          state: 'pending',
+          pendingTokenEstimate: 2100,
+          distillationThresholdTokens: 2000,
+          lastSavedCount: 0,
+          rerunQueued: false,
+        });
+      }, 0);
+      setTimeout(() => {
+        statusListener?.({
+          state: 'running',
+          pendingTokenEstimate: 2100,
+          distillationThresholdTokens: 2000,
+          lastSavedCount: 0,
+          rerunQueued: false,
+        });
+      }, 5);
+      setTimeout(() => {
+        statusListener?.({
+          state: 'idle',
+          pendingTokenEstimate: 0,
+          distillationThresholdTokens: 2000,
+          lastSavedCount: 1,
+          lastRunAt: '2026-03-23T10:00:00.000Z',
+          lastSummary: 'Saved one durable memory.',
+          rerunQueued: false,
+        });
+      }, 10);
+      return 'done';
+    },
+    didStreamLastTurn() {
+      return false;
+    },
+    getTokenUsage() {
+      return { model: 'gpt-5-mini', used: 120, max: 1000, compacting: false };
+    },
+    getMemorySidekickStatus() {
+      return {
+        state: 'idle',
+        pendingTokenEstimate: 0,
+        distillationThresholdTokens: 2000,
+        lastSavedCount: 1,
+        lastRunAt: '2026-03-23T10:00:00.000Z',
+        lastSummary: 'Saved one durable memory.',
+        rerunQueued: false,
+      };
+    },
+  };
+  const cli = new CLIInterface(agent);
+
+  const { output } = await withPromptMock(
+    [
+      () => ({ command: 'remember this' }),
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw { isTtyError: true };
+      },
+    ],
+    () => captureConsole(async () => {
+      await cli.start();
+    }),
+  );
+
+  assert.match(output, /Memory sidekick queued in background \(2,100 pending tokens\)\./);
+  assert.match(output, /Memory sidekick saving in background\.\.\./);
+  assert.match(output, /Memory sidekick finished: Saved one durable memory\./);
+});
+
 await test('CLI /memory-status prints the current sidekick status', async () => {
   const agent = {
     getMemorySidekickStatus() {

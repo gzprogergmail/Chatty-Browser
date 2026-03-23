@@ -1,4 +1,5 @@
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -32,9 +33,17 @@ export interface LLMPayloadLogEntry {
   payload: unknown;
 }
 
+export interface MemoryOperationLogEntry {
+  ts: string;
+  category: 'conversation' | 'tool' | 'status' | 'distillation' | 'llm' | 'memory';
+  action: string;
+  payload: unknown;
+}
+
 class RotatingJsonlLogger<TEntry extends { ts: string }> {
   private filePath: string | null = null;
   private fileBytes = 0;
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly filePrefix: string,
@@ -48,27 +57,39 @@ class RotatingJsonlLogger<TEntry extends { ts: string }> {
     const line = JSON.stringify(full) + '\n';
     const lineBytes = Buffer.byteLength(line, 'utf8');
 
+    this.writeChain = this.writeChain
+      .then(() => this.writeLine(line, lineBytes))
+      .catch((error) => {
+        console.error(`Failed to write ${this.filePrefix} log entry:`, error);
+      });
+  }
+
+  async flush(): Promise<void> {
+    await this.writeChain;
+  }
+
+  private async writeLine(line: string, lineBytes: number): Promise<void> {
     if (this.filePath === null || this.fileBytes + lineBytes > MAX_FILE_BYTES) {
-      this.openNewFile();
+      await this.openNewFile();
     }
 
-    fs.appendFileSync(this.filePath!, line, 'utf8');
+    await fsPromises.appendFile(this.filePath!, line, 'utf8');
     this.fileBytes += lineBytes;
   }
 
-  private openNewFile(): void {
+  private async openNewFile(): Promise<void> {
     const ts = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-');
     const seq = String(++_fileSeq).padStart(4, '0');
     this.filePath = path.join(LOG_DIR, `${this.filePrefix}-${ts}-${seq}.jsonl`);
     this.fileBytes = 0;
 
-    const existing = fs.readdirSync(LOG_DIR)
+    const existing = (await fsPromises.readdir(LOG_DIR))
       .filter(f => f.startsWith(`${this.filePrefix}-`) && f.endsWith('.jsonl'))
       .sort()
       .map(f => path.join(LOG_DIR, f));
 
     while (existing.length >= this.maxFiles) {
-      fs.unlinkSync(existing.shift()!);
+      await fsPromises.unlink(existing.shift()!);
     }
   }
 
@@ -89,5 +110,20 @@ class LLMPayloadLogger extends RotatingJsonlLogger<LLMPayloadLogEntry> {
   }
 }
 
+class MemoryOperationLogger extends RotatingJsonlLogger<MemoryOperationLogEntry> {
+  constructor() {
+    super('memory-operations', 10);
+  }
+}
+
 export const toolLogger = new ToolLogger();
 export const llmPayloadLogger = new LLMPayloadLogger();
+export const memoryOperationLogger = new MemoryOperationLogger();
+
+export async function flushLoggers(): Promise<void> {
+  await Promise.all([
+    toolLogger.flush(),
+    llmPayloadLogger.flush(),
+    memoryOperationLogger.flush(),
+  ]);
+}

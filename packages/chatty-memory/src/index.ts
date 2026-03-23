@@ -138,6 +138,15 @@ export interface MemorySidekickStatus {
   rerunQueued: boolean;
 }
 
+export type MemoryOperationCategory = 'conversation' | 'tool' | 'status' | 'distillation' | 'memory';
+
+export interface MemoryOperationEvent {
+  ts: string;
+  category: MemoryOperationCategory;
+  action: string;
+  payload: Record<string, unknown>;
+}
+
 export interface MemoryManagerOptions {
   dbPath?: string;
   distillationThresholdTokens?: number;
@@ -1080,19 +1089,47 @@ export class MemoryManager extends EventEmitter {
   }
 
   async callTool(name: string, args: unknown): Promise<unknown> {
-    return this.store.callTool(name, args);
+    this.emitOperation('tool', 'call', {
+      tool: name,
+      args: this.toLogValue(args),
+    });
+
+    try {
+      const result = await this.store.callTool(name, args);
+      this.emitOperation('tool', 'result', {
+        tool: name,
+        args: this.toLogValue(args),
+        result: this.toLogValue(result),
+      });
+      return result;
+    } catch (error) {
+      this.emitOperation('tool', 'error', {
+        tool: name,
+        args: this.toLogValue(args),
+        error: this.formatError(error),
+      });
+      throw error;
+    }
   }
 
   saveMemory(args: SaveMemoryArgs): SaveMemoryResult {
-    return this.store.saveMemory(args);
+    return this.saveMemoryFrom('api', args);
   }
 
   queryMemory(args: QueryMemoryArgs): QueryMemoryResult {
-    return this.store.queryMemory(args);
+    return this.queryMemoryFrom('api', args);
   }
 
   recordConversationMessage(input: ConversationMessageInput): ArchivedConversationMessage {
-    return this.store.appendConversationMessage(input);
+    const archived = this.store.appendConversationMessage(input);
+    this.emitOperation('conversation', 'recorded', {
+      messageId: archived.id,
+      role: archived.role,
+      tokenEstimate: archived.tokenEstimate,
+      source: archived.source ?? null,
+      content: archived.content,
+    });
+    return archived;
   }
 
   recordConversationTurn(messages: ConversationMessageInput[]): ArchivedConversationMessage[] {
@@ -1119,7 +1156,12 @@ export class MemoryManager extends EventEmitter {
       return;
     }
 
-    this.activeRun = this.runDistillation();
+    this.updateStatus({ state: 'pending', pendingTokenEstimate, rerunQueued: false, lastError: undefined });
+    this.emitOperation('distillation', 'scheduled', {
+      pendingTokenEstimate,
+      distillationThresholdTokens: this.distillationThresholdTokens,
+    });
+    this.activeRun = this.runDistillationDeferred();
     void this.activeRun.finally(() => {
       this.activeRun = null;
       if (this.rerunQueued) {
@@ -1153,6 +1195,13 @@ export class MemoryManager extends EventEmitter {
     this.store.close();
   }
 
+  private async runDistillationDeferred(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    await this.runDistillation();
+  }
+
   private async runDistillation(): Promise<void> {
     if (!this.distiller) return;
 
@@ -1174,6 +1223,13 @@ export class MemoryManager extends EventEmitter {
       rerunQueued: this.rerunQueued,
       lastError: undefined,
     });
+    this.emitOperation('distillation', 'started', {
+      lastDistilledMessageId,
+      messageCount: messages.length,
+      pendingTokenEstimate,
+      memorySnapshotCount: memorySnapshot.length,
+      messageIds: messages.map((message) => message.id),
+    });
 
     try {
       const result = await this.distiller({
@@ -1183,14 +1239,26 @@ export class MemoryManager extends EventEmitter {
         distillationThresholdTokens: this.distillationThresholdTokens,
       });
 
-      const saved = (result.memories ?? [])
-        .map((candidate) => this.store.saveMemory(candidate))
-        .length;
+      const savedMemories = (result.memories ?? [])
+        .map((candidate) => this.saveMemoryFrom('sidekick', candidate));
+      const saved = savedMemories.length;
 
       const lastMessage = messages.at(-1);
       if (lastMessage) {
         this.store.setRuntimeState(LAST_DISTILLED_MESSAGE_ID_KEY, String(lastMessage.id));
       }
+
+      this.emitOperation('distillation', 'completed', {
+        lastProcessedMessageId: lastMessage?.id ?? null,
+        pendingTokenEstimate,
+        savedCount: saved,
+        summary: result.summary ?? null,
+        memories: savedMemories.map((memory) => ({
+          memoryId: memory.memoryId,
+          subject: memory.subject,
+          status: memory.status,
+        })),
+      });
 
       this.updateStatus({
         state: 'idle',
@@ -1202,6 +1270,10 @@ export class MemoryManager extends EventEmitter {
         rerunQueued: this.rerunQueued,
       });
     } catch (error) {
+      this.emitOperation('distillation', 'error', {
+        pendingTokenEstimate,
+        error: this.formatError(error),
+      });
       this.updateStatus({
         state: 'error',
         pendingTokenEstimate,
@@ -1222,5 +1294,78 @@ export class MemoryManager extends EventEmitter {
       ...partial,
     };
     this.emit('status', this.getSidekickStatus());
+    this.emitOperation('status', 'updated', {
+      state: this.status.state,
+      pendingTokenEstimate: this.status.pendingTokenEstimate,
+      distillationThresholdTokens: this.status.distillationThresholdTokens,
+      lastRunAt: this.status.lastRunAt ?? null,
+      lastSummary: this.status.lastSummary ?? null,
+      lastSavedCount: this.status.lastSavedCount,
+      lastError: this.status.lastError ?? null,
+      rerunQueued: this.status.rerunQueued,
+    });
+  }
+
+  private saveMemoryFrom(source: 'api' | 'sidekick', args: SaveMemoryArgs): SaveMemoryResult {
+    const result = this.store.saveMemory(args);
+    this.emitOperation('memory', 'saved', {
+      source,
+      args: this.toLogValue(args),
+      result: this.toLogValue(result),
+    });
+    return result;
+  }
+
+  private queryMemoryFrom(source: 'api', args: QueryMemoryArgs): QueryMemoryResult {
+    const result = this.store.queryMemory(args);
+    this.emitOperation('memory', 'queried', {
+      source,
+      args: this.toLogValue(args),
+      result: this.toLogValue({
+        mode: result.mode,
+        count: result.count,
+        summary: result.summary,
+        memories: result.memories.map((memory) => ({
+          id: memory.id,
+          subject: memory.subject,
+          status: memory.status,
+          matchReasons: memory.matchReasons,
+        })),
+      }),
+    });
+    return result;
+  }
+
+  private emitOperation(
+    category: MemoryOperationCategory,
+    action: string,
+    payload: Record<string, unknown>,
+  ): void {
+    this.emit('operation', {
+      ts: new Date().toISOString(),
+      category,
+      action,
+      payload,
+    } satisfies MemoryOperationEvent);
+  }
+
+  private formatError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private toLogValue(value: unknown): Record<string, unknown> | string | number | boolean | null | Array<unknown> {
+    if (value == null) return null;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.toLogValue(entry));
+    }
+    if (typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, this.toLogValue(entry)]),
+      );
+    }
+    return String(value);
   }
 }

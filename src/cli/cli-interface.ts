@@ -2,11 +2,28 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { BrowserAgent } from '../agent/browser-agent.js';
 import type { AvailableModel } from '../copilot/copilot-client.js';
+import type { MemorySidekickStatus } from '../memory/memory-store.js';
 
 export class CLIInterface {
   private running = false;
+  private activeTurn = false;
+  private pendingMemoryFeedback: MemorySidekickStatus | null = null;
+  private lastMemoryFeedbackKey: string | null = null;
+  private lastAnnouncedRunAt: string | null = null;
+  private readonly unsubscribeMemoryStatus: () => void;
 
-  constructor(private agent: BrowserAgent) {}
+  constructor(private agent: BrowserAgent) {
+    this.unsubscribeMemoryStatus = typeof this.agent.onMemorySidekickStatusChange === 'function'
+      ? this.agent.onMemorySidekickStatusChange((status) => {
+          if (this.activeTurn) {
+            this.pendingMemoryFeedback = status;
+            return;
+          }
+
+          this.maybeRenderMemoryFeedback(status);
+        })
+      : () => {};
+  }
 
   async start() {
     this.running = true;
@@ -75,8 +92,10 @@ export class CLIInterface {
 
         // Execute the command through the agent
         console.log(chalk.gray('\n🤖 Agent: Processing...\n'));
-        
+        this.activeTurn = true;
         const response = await this.agent.executeCommand(trimmedCommand);
+        this.activeTurn = false;
+        this.flushPendingMemoryFeedback();
 
         if (this.agent.didStreamLastTurn()) {
           process.stdout.write('\n');
@@ -89,6 +108,8 @@ export class CLIInterface {
         this.showMemorySidekickStatus();
 
       } catch (error) {
+        this.activeTurn = false;
+        this.flushPendingMemoryFeedback();
         if ((error as any).isTtyError) {
           console.error(chalk.red('CLI could not be rendered in this environment'));
           this.running = false;
@@ -161,6 +182,50 @@ export class CLIInterface {
         `   Memory sidekick: ${status.state} (${status.pendingTokenEstimate.toLocaleString()} / ${status.distillationThresholdTokens.toLocaleString()} pending tokens${queuedText}${summary}${errorText})`,
       ) + '\n',
     );
+  }
+
+  private flushPendingMemoryFeedback() {
+    if (!this.pendingMemoryFeedback) return;
+    const pending = this.pendingMemoryFeedback;
+    this.pendingMemoryFeedback = null;
+    this.maybeRenderMemoryFeedback(pending);
+  }
+
+  private maybeRenderMemoryFeedback(status: MemorySidekickStatus) {
+    const feedback = this.buildMemoryFeedback(status);
+    if (!feedback) return;
+
+    const feedbackKey = `${status.state}|${status.rerunQueued}|${status.lastRunAt ?? ''}|${status.lastSummary ?? ''}|${status.lastError ?? ''}|${status.pendingTokenEstimate}`;
+    if (feedbackKey === this.lastMemoryFeedbackKey) return;
+
+    this.lastMemoryFeedbackKey = feedbackKey;
+    console.log(feedback);
+  }
+
+  private buildMemoryFeedback(status: MemorySidekickStatus): string | null {
+    if (status.state === 'pending') {
+      return chalk.gray(
+        `   Memory sidekick queued in background (${status.pendingTokenEstimate.toLocaleString()} pending tokens).`,
+      );
+    }
+
+    if (status.state === 'running') {
+      return chalk.gray('   Memory sidekick saving in background...');
+    }
+
+    if (status.state === 'error' && status.lastError) {
+      return chalk.yellow(`   Memory sidekick hit an error: ${status.lastError}`);
+    }
+
+    if (status.state === 'idle' && status.lastRunAt && status.lastRunAt !== this.lastAnnouncedRunAt) {
+      this.lastAnnouncedRunAt = status.lastRunAt;
+      const summary = status.lastSummary ?? (status.lastSavedCount > 0
+        ? `Saved ${status.lastSavedCount} memory item${status.lastSavedCount === 1 ? '' : 's'}.`
+        : 'No durable memory found.');
+      return chalk.gray(`   Memory sidekick finished: ${summary}`);
+    }
+
+    return null;
   }
 
   private handleTimeoutCommand(command: string) {
@@ -262,5 +327,6 @@ export class CLIInterface {
 
   stop() {
     this.running = false;
+    this.unsubscribeMemoryStatus();
   }
 }

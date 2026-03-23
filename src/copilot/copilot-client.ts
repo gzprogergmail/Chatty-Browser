@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import type { MemoryDistillationRequest } from '../memory/memory-store.js';
 import type { MemoryDistillationResult } from '../memory/memory-store.js';
-import { llmPayloadLogger, toolLogger } from './tool-logger.js';
+import { llmPayloadLogger, memoryOperationLogger, toolLogger } from './tool-logger.js';
 
 const LOG_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -544,12 +544,37 @@ export class CopilotClient {
         JSON.stringify(request.memorySnapshot, null, 2),
       ].join('\n');
 
+      memoryOperationLogger.log({
+        category: 'llm',
+        action: 'distillation.request',
+        payload: {
+          sessionId: sidekickSession.sessionId,
+          model: this.model,
+          reasoningEffort: this.reasoningEffort,
+          prompt,
+          messageCount: request.messages.length,
+          memorySnapshotCount: request.memorySnapshot.length,
+          pendingTokenEstimate: request.pendingTokenEstimate,
+          distillationThresholdTokens: request.distillationThresholdTokens,
+        },
+      });
+
       const response = await sidekickSession.sendAndWait({ prompt }, Math.max(this.turnTimeoutMs, 120_000));
       const rawContent = response?.data?.content ?? '';
+      memoryOperationLogger.log({
+        category: 'llm',
+        action: 'distillation.response',
+        payload: {
+          sessionId: sidekickSession.sessionId,
+          model: this.model,
+          reasoningEffort: this.reasoningEffort,
+          rawContent,
+        },
+      });
       const parsed = this.extractJsonObject(rawContent);
       const memories = Array.isArray(parsed.memories) ? parsed.memories : [];
 
-      return {
+      const result = {
         summary: typeof parsed.summary === 'string' ? parsed.summary : undefined,
         memories: memories
           .filter((candidate): candidate is Record<string, unknown> => typeof candidate === 'object' && candidate !== null)
@@ -570,6 +595,26 @@ export class CopilotClient {
           }))
           .filter((candidate) => candidate.subject.trim() && candidate.summary.trim()),
       };
+      memoryOperationLogger.log({
+        category: 'distillation',
+        action: 'distillation.parsed',
+        payload: {
+          sessionId: sidekickSession.sessionId,
+          summary: result.summary ?? null,
+          memoryCount: result.memories?.length ?? 0,
+          memories: result.memories ?? [],
+        },
+      });
+      return result;
+    } catch (error) {
+      memoryOperationLogger.log({
+        category: 'distillation',
+        action: 'distillation.failed',
+        payload: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      throw error;
     } finally {
       await sidekickSession.disconnect().catch(() => {});
     }

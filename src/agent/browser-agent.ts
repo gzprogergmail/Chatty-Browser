@@ -4,8 +4,10 @@ import type { PremiumRequestsUsage } from '../copilot/copilot-client.js';
 import type { TokenUsageSnapshot } from '../copilot/copilot-client.js';
 import { MemoryManager } from '../memory/memory-store.js';
 import type { MemoryManagerOptions } from '../memory/memory-store.js';
+import type { MemoryOperationEvent } from '../memory/memory-store.js';
 import type { MemorySidekickStatus } from '../memory/memory-store.js';
 import { MCPServerManager } from '../mcp/mcp-server-manager.js';
+import { memoryOperationLogger } from '../copilot/tool-logger.js';
 import chalk from 'chalk';
 
 interface BrowserAgentOptions {
@@ -52,6 +54,14 @@ If something goes wrong, explain the error and suggest alternatives.`;
       distiller: typeof this.copilot.distillConversationMemory === 'function'
         ? (request) => this.copilot.distillConversationMemory(request)
         : undefined,
+    });
+
+    this.memory.on('operation', (event: MemoryOperationEvent) => {
+      memoryOperationLogger.log({
+        category: event.category,
+        action: event.action,
+        payload: event.payload,
+      });
     });
   }
 
@@ -133,6 +143,13 @@ If something goes wrong, explain the error and suggest alternatives.`;
 
   getMemorySidekickStatus(): MemorySidekickStatus {
     return this.memory.getSidekickStatus();
+  }
+
+  onMemorySidekickStatusChange(listener: (status: MemorySidekickStatus) => void): () => void {
+    this.memory.on('status', listener);
+    return () => {
+      this.memory.off('status', listener);
+    };
   }
 
   async flushMemorySidekick(): Promise<void> {

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { BrowserAgent } from './dist/agent/browser-agent.js';
 import { MemoryManager } from './dist/memory/memory-store.js';
+import { flushLoggers, memoryOperationLogger } from './dist/copilot/tool-logger.js';
 
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -180,6 +181,77 @@ await test('BrowserAgent records turns and exposes sidekick status from the pack
     const memories = memoryManager.queryMemory({ query: 'concise answers', includeFullDetails: true, limit: 5 });
     assert.equal(memories.count, 1);
     assert.equal(memories.memories[0].subject, 'user preference');
+  } finally {
+    memoryManager.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test('BrowserAgent exposes status subscriptions and writes memory operation JSONL logs', async () => {
+  const dir = path.join(process.cwd(), 'test-artifacts', 'browser-agent-memory-logs');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const dbPath = path.join(dir, 'memory.sqlite');
+
+  const memoryManager = new MemoryManager({
+    dbPath,
+    distillationThresholdTokens: 1,
+    async distiller() {
+      return {
+        summary: 'Saved one durable note.',
+        memories: [{
+          scope: 'project',
+          subject: 'memory logging',
+          summary: 'Memory operations should be logged to JSONL.',
+        }],
+      };
+    },
+  });
+
+  const seenStatuses = [];
+
+  try {
+    const copilot = {
+      async sendMessage() {
+        return 'Working on it.';
+      },
+      didStreamLastTurn() {
+        return false;
+      },
+    };
+    const mcp = {
+      getTools() {
+        return [];
+      },
+      async callTool() {
+        throw new Error('MCP should not be called in this test');
+      },
+    };
+    const agent = new BrowserAgent(copilot, mcp, { memoryManager });
+    const unsubscribe = agent.onMemorySidekickStatusChange((status) => {
+      seenStatuses.push(status.state);
+    });
+
+    await agent.executeCommand('remember the logging change');
+    await agent.flushMemorySidekick();
+    unsubscribe();
+    await flushLoggers();
+
+    assert.ok(seenStatuses.includes('pending'));
+    assert.ok(seenStatuses.includes('running'));
+    assert.ok(seenStatuses.includes('idle'));
+
+    const logPath = memoryOperationLogger.currentFilePath;
+    assert.ok(logPath);
+    const logLines = fs.readFileSync(logPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+
+    assert.ok(logLines.some((entry) => entry.category === 'conversation' && entry.action === 'recorded'));
+    assert.ok(logLines.some((entry) => entry.category === 'memory' && entry.action === 'saved'));
+    assert.ok(logLines.some((entry) => entry.category === 'distillation' && entry.action === 'completed'));
   } finally {
     memoryManager.close();
     fs.rmSync(dir, { recursive: true, force: true });
