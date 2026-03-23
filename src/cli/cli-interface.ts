@@ -135,10 +135,8 @@ export class CLIInterface {
 
   private async showPremiumRequestsUsage() {
     const usage = await this.agent.getPremiumRequestsUsage();
-    const percent = (usage.remainingPercentage * 100).toFixed(1);
-    const resetText = usage.resetDate
-      ? new Date(usage.resetDate).toLocaleString()
-      : 'unknown';
+    const percent = this.formatPremiumRemainingPercent(usage.remainingRequests, usage.entitlementRequests, usage.remainingPercentage);
+    const resetText = this.formatNextPremiumResetDate();
     const overageText = usage.overageAllowedWithExhaustedQuota ? 'allowed' : 'not allowed';
 
     console.log(chalk.cyan('\n📊 Copilot Premium Usage\n'));
@@ -147,6 +145,39 @@ export class CLIInterface {
     console.log(`   Used: ${usage.usedRequests.toLocaleString()} requests`);
     console.log(`   Overage: ${usage.overage.toLocaleString()} (${overageText})`);
     console.log(`   Reset: ${resetText}\n`);
+  }
+
+  private formatPremiumRemainingPercent(remainingRequests: number, entitlementRequests: number, fallbackPercentage: number): string {
+    if (entitlementRequests > 0) {
+      return ((remainingRequests / entitlementRequests) * 100).toFixed(1);
+    }
+
+    const normalizedPercentage = fallbackPercentage > 1 ? fallbackPercentage : fallbackPercentage * 100;
+    return normalizedPercentage.toFixed(1);
+  }
+
+  private formatNextPremiumResetDate(now: Date = new Date()): string {
+    const nextReset = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth() + 1,
+      1,
+      0,
+      0,
+      0,
+      0,
+    ));
+
+    return nextReset.toLocaleString('en-US', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+      timeZoneName: 'short',
+    });
   }
 
   private buildBar(used: number, max: number, width: number): string {

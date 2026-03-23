@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import inquirer from 'inquirer';
+import { BrowserAgent } from './dist/agent/browser-agent.js';
 import { CLIInterface } from './dist/cli/cli-interface.js';
 import { CopilotClient } from './dist/copilot/copilot-client.js';
 
@@ -207,6 +208,16 @@ await test('CopilotClient premium usage throws when Copilot returns no premium q
   );
 });
 
+await test('BrowserAgent system prompt prefers autonomous research and default browser opening', async () => {
+  const agent = new BrowserAgent({}, {});
+  const prompt = agent.systemPrompt;
+
+  assert.match(prompt, /Take initiative and try to complete the user's goal end-to-end/);
+  assert.match(prompt, /Prefer doing web research in the browser to resolve missing details/);
+  assert.match(prompt, /If the user asks to open something, default to opening it in the browser/);
+  assert.match(prompt, /use the browser to research it, make the best-supported guess/);
+});
+
 await test('CLI help text lists the new /usage command', async () => {
   const cli = new CLIInterface({});
   const { output } = await captureConsole(async () => {
@@ -279,6 +290,89 @@ await test('CLI /usage command calls the agent and prints the remaining premium 
   assert.match(output, /Remaining: 80 \/ 100 requests \(80\.0%\)/);
   assert.match(output, /Used: 20 requests/);
   assert.match(output, /Overage: 0 \(not allowed\)/);
+});
+
+await test('CLI /usage computes the displayed percentage from request counts', async () => {
+  const agent = {
+    async getPremiumRequestsUsage() {
+      return {
+        quotaName: 'premium_interactions',
+        entitlementRequests: 300,
+        usedRequests: 203,
+        remainingRequests: 97,
+        remainingPercentage: 32.4,
+        overage: 0,
+        overageAllowedWithExhaustedQuota: false,
+        resetDate: '2026-04-01T00:00:00.000Z',
+      };
+    },
+  };
+  const cli = new CLIInterface(agent);
+
+  const { output } = await withPromptMock(
+    [
+      () => ({ command: '/usage' }),
+      { isTtyError: true },
+    ],
+    () => captureConsole(async () => {
+      await cli.start();
+    }),
+  );
+
+  assert.match(output, /Remaining: 97 \/ 300 requests \(32\.3%\)/);
+  assert.doesNotMatch(output, /3240\.0%/);
+});
+
+await test('CLI /usage shows the next monthly premium reset date in UTC', async () => {
+  const agent = {
+    async getPremiumRequestsUsage() {
+      return {
+        quotaName: 'premium_interactions',
+        entitlementRequests: 100,
+        usedRequests: 20,
+        remainingRequests: 80,
+        remainingPercentage: 80,
+        overage: 0,
+        overageAllowedWithExhaustedQuota: false,
+        resetDate: '2026-03-23T01:53:50.154Z',
+      };
+    },
+  };
+  const cli = new CLIInterface(agent);
+  const RealDate = global.Date;
+
+  class MockDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) {
+        super('2026-03-22T18:48:34.000Z');
+        return;
+      }
+
+      super(...args);
+    }
+
+    static now() {
+      return new RealDate('2026-03-22T18:48:34.000Z').getTime();
+    }
+  }
+
+  global.Date = MockDate;
+
+  let output;
+  try {
+    ({ output } = await withPromptMock(
+      [
+        () => ({ command: '/usage' }),
+        { isTtyError: true },
+      ],
+      () => captureConsole(async () => {
+        await cli.start();
+      }),
+    ));
+  } finally {
+    global.Date = RealDate;
+  }
+  assert.match(output, /Reset: Apr 1, 2026, 12:00:00 AM UTC/);
 });
 
 console.log(`\n${'─'.repeat(68)}`);
