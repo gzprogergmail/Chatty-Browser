@@ -1,11 +1,12 @@
 # Self-Contained Browser Agent
 
-A command-line application that allows you to control a web browser using natural language commands powered by GitHub Copilot (GPT-4o) and Playwright via MCP (Model Context Protocol).
+A command-line application that allows you to control a web browser using natural language commands powered by GitHub Copilot and Playwright via MCP (Model Context Protocol).
 
 ## Features
 
 - 🔐 **GitHub OAuth Authentication** - Secure device flow authentication
-- 🤖 **GPT-4o Integration** - Uses GitHub Copilot with GPT-4o model
+- 🤖 **Copilot Integration** - Uses GitHub Copilot with `gpt-5-mini`
+- 💭 **Live Thinking Stream** - Shows Copilot reasoning summaries when the selected model/session emits them
 - 🌐 **Browser Automation** - Controls Chromium browser via Playwright MCP server
 - 💬 **Interactive CLI** - Natural language command interface
 - 🔧 **MCP Tools** - Full access to Playwright automation capabilities
@@ -58,7 +59,7 @@ npm run dev
 On first run, you'll be guided through:
 
 1. **GitHub Authentication** - A browser will open for you to authorize the application
-2. **Copilot Connection** - Automatically connects to GPT-4o
+2. **Copilot Connection** - Automatically connects to `gpt-5-mini` with `medium` reasoning
 3. **MCP Server Start** - Launches the Playwright MCP server
 4. **Browser Launch** - Opens Chromium browser
 5. **CLI Ready** - Start typing commands!
@@ -86,11 +87,11 @@ You: Click the submit button
 ## How It Works
 
 1. **Authentication**: Uses GitHub's device flow OAuth to authenticate
-2. **Copilot API**: Connects to GitHub Copilot's API with GPT-4o model selection
+2. **Copilot API**: Connects to GitHub Copilot's API with `gpt-5-mini` and `medium` reasoning
 3. **MCP Server**: Spawns Playwright MCP server as a subprocess
 4. **Agent Loop**: 
    - Receives your natural language command
-   - GPT-4o decides which Playwright tools to use
+   - Copilot decides which Playwright tools to use
    - Executes tools via MCP protocol
    - Returns results and feedback
 5. **CLI Interface**: Provides an interactive command-line experience
